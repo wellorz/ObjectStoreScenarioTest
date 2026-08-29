@@ -1,227 +1,266 @@
-# Directory Object Store TDS longevity scenario
+# Directory Object Store ScenarioTest
 
-`Invoke-DirectoryObjectStoreLongevity.ps1` generates sustained recipient and link traffic on an isolated TDS Exchange box and validates AD against L2/Object Store.
+This repository contains the ScenarioTest harness and Copilot skill for
+creating isolated Exchange recipients on a TDS machine, mutating recipient and
+link properties, and comparing Active Directory with Directory Object Store.
 
-## Attribute-coverage workload
+The primary interface is the five `ScenarioCommand` values below. Legacy
+`AttributeCoverage` and time-based `Longevity` modes remain available for
+advanced use.
 
-`AttributeCoverage` is the default workload mode. It:
+## Shared commands
 
-1. Creates `CoverageRecipientCount` mail contacts and `CoverageGroupCount` distribution groups.
-2. Builds a safe, data-driven attribute catalog for each object type.
-3. Randomizes the catalog independently for every object.
-4. Upserts one remaining attribute per object in each round.
-5. Waits for the recipient sync cookie and requires Compare Engine `DataSame` for every mutated object before starting the next round.
-6. Repeats until every catalogued attribute has been upserted on every applicable object.
-7. Randomizes the catalog again and clears one attribute per object per round, with the same Compare Engine gate, until every clearable value has been removed.
+Users can invoke the skill with one of these exact command names:
 
-The recipient catalog includes `msExchMultiMailboxDatabasesLink`. The harness writes its
-DN-string value using `Set-ADObject`, validates both ranged add and ranged delete changes,
-and requires `RecipientChange.MaterialRangedAttr` telemetry. Missing telemetry or any
-AD/Object Store divergence pauses the run with diagnostics.
+| Command | Scenarios | Fresh population | Estimate | Batches |
+| --- | --- | ---: | ---: | ---: |
+| `User-Upsert` | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert | 235 contacts | about 1 hour | 12 |
+| `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 267 groups | about 75 minutes | 12 |
+| `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | 235 contacts | about 80 minutes | 12 |
+| `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 267 groups | about 90 minutes | 12 |
+| `RunAll` | All 12 scenarios in canonical order | 235 contacts and 267 groups | about 5 hours | 48 |
+
+Each scenario has four batches:
+
+1. Batch 0 mutates one property on every object.
+2. Batches 1-3 use deterministic variable-width property selections.
+3. Every mutation batch completes before the 15-second sync wait begins.
+4. The next batch starts only after every required comparison returns
+   `DataSame`.
+
+Deletion commands first prepare missing values for every object, compare all
+seeded baselines together, and only then start deletion mutations.
+
+## PowerShell invocation
+
+Run the harness from an elevated Windows PowerShell 5.1 Exchange environment
+on the TDS machine:
 
 ```powershell
 .\Invoke-DirectoryObjectStoreLongevity.ps1 `
-    -WorkloadMode AttributeCoverage `
-    -CoverageRecipientCount 100 `
-    -CoverageGroupCount 50 `
-    -Organization <test-organization> `
-    -ObjectPrefix DOSAttributes `
-    -ConfigureEnvironment `
-    -CleanupOnSuccess
+    -WorkloadMode ScenarioTest `
+    -ScenarioCommand User-Upsert `
+    -Organization contoso.com `
+    -ObjectPrefix DOSUserUpsert `
+    -Side A `
+    -ObjectStoreDestination Test `
+    -CompareSetupScript C:\tds\CompareAndRepairSetup.ps1 `
+    -ScenarioRuntimeDependencyRoot C:\tds\RuntimeDependencies\net472
 ```
 
-Each object receives at most one mutation per round. Comparisons are batched, but every
-result must be `DataSame`; an object is never mutated again before its previous mutation
-has converged and passed comparison.
+Replace `User-Upsert` with any command from the table. Use a unique
+`ObjectPrefix` for every new population.
 
-## Time-based longevity workload
+The script records the selected command, phase list, estimate, population
+sizes, and total batch count in `parameters.json`, `status.json`,
+`checkpoint.json`, and `summary.json`.
 
-Use `-WorkloadMode Longevity` for the fixed production-shaped mix:
+## Start announcement
 
-| Operation | Weight |
-| --- | ---: |
-| Create mail contact | 12% |
-| Update mail contact | 20% |
-| Remove unlinked mail contact | 6% |
-| Create distribution group | 6% |
-| Update distribution group | 8% |
-| Remove distribution group | 3% |
-| Add group membership link | 15% |
-| Remove group membership link | 10% |
-| Read recipient | 12% |
-| Read group membership | 8% |
+Before launching, the skill reports:
 
-Mail contacts are used instead of mailboxes so the scenario never creates or stores credentials.
+```text
+Command: <command>
+Scenarios: <ordered scenario names>
+Estimated duration: <estimate>
+Population: <contacts/groups to create>
+Monitoring: every 2 minutes for the first 10 traffic minutes, then every
+5 minutes while healthy.
+```
 
-Every mutation queues an AD-to-Object Store comparison after the configured convergence delay. Deletions are checked from AD and then through the OS-to-AD comparison path. Any unexpected command failure, comparison failure, or convergence timeout atomically pauses traffic and writes diagnostics.
+The estimates describe expected scenario execution on a healthy TDS machine.
+Initial preflight, exhaustive qualification, environment repair, or a script
+repair can add time.
 
 ## Prerequisites
 
-- Run from an elevated Exchange Management Shell on a dedicated TDS Exchange box.
-- `MSExchangeDirCacheService` must be installed and running.
-- The Substrate enlistment containing `CompareAndRepairSetup.ps1` must be available at the default path, or pass `-CompareSetupScript`.
-- Copy the `RuntimeDependencies\net472` folder with the harness. ScenarioTest loads
-  `Microsoft.Exchange.Directory.ChaosTest.dll` from this bundle when the TDS build does
-  not install the .NET Framework binary under `V15\Bin`.
-- Use a dedicated test organization when possible. Every created object has the supplied `-ObjectPrefix`, but cleanup uses the run ledger rather than a broad prefix search.
+- Use a dedicated Windows TDS Exchange machine.
+- Run from an elevated Windows PowerShell 5.1 process.
+- `MSExchangeDirCacheService`, OLS, and
+  `M365DirectoryProxyService` must be healthy.
+- Ports 83 and 6092 must be listening.
+- Supply a test organization such as `contoso.com`.
+- Keep `CompareAndRepairSetup.ps1` available on the TDS machine.
+- Provision `RuntimeDependencies\net472` from an authorized internal build.
+  Do not commit compiled Exchange binaries to this repository.
+- Use a dedicated, unique object prefix.
 
-ScenarioTest preflight invokes one read-only AD-to-Object Store comparison with
-`-SkipUploadingDivergence`. This validates the same comparison runtime used after
-bootstrap, including transitive assembly loading, before any test objects are created.
-It also rejects AD-owned operational attributes such as `objectCategory` if they
-are accidentally added to an upsert property array.
+`User` means a mail-contact recipient created by this harness. It does not
+mean an AD user or mailbox user. `Group` means a distribution group created by
+the harness.
 
-Before ScenarioTest traffic, run the exhaustive harness qualification required
-by `ScenarioTest.md`. It materializes the complete deterministic 48-batch plan,
-validates every generated value and semantic target, exercises bounded ADWS and
-LDAP request planning, and aggregates all probe-write defects into one report.
-Do not use the live scenario to discover generator defects one at a time.
-During deterministic qualification, `qualification-progress.json` exposes the
-current phase, batch, object `m/N`, overall object-plan `m/N`, percentage, and
-failure count for monitoring.
+## Preflight and qualification
 
-When resuming the same plan-version run, the harness reuses its existing
-zero-defect `qualification.json` and checkpoint. By default it skips the full
-preflight and does not repeat completed qualification visits, batches, or
-object mutations. Use `-ForceFullPreflightOnResume` only for a failure proven
-to involve preflight or environment state.
+A new command run performs:
 
-The run also persists `scenario-target-context.clixml`. A matching resume
-restores this cache instead of repeating the 21 isolated Exchange/AD target
-queries, each of which otherwise starts a fresh Windows PowerShell child.
+1. Exchange and Object Store cookie initialization.
+2. Comparison-runtime checks.
+3. LDAP schema and property-generator validation.
+4. Command-specific deterministic qualification.
+5. Semantic target checks.
+6. Fresh population creation.
 
-Each active scenario batch persists its deterministic object/property mapping
-in `scenario-plan-pNN-bNN.json`. Deletion batches first prepare and seed every
-object, validate all seeded GUIDs at one barrier, and then execute
-`MUTATE_ALL`. Preparation progress is checkpointed independently from completed
-deletions. Tenant identity anchors `msExchCU` and `msExchOURoot` are never
-selected for deletion.
+Qualification covers only the phases selected by `ScenarioCommand`:
 
-Monitored JSON snapshots use unique temporary files and atomic same-volume
-replacement with bounded retry. Concurrent reads therefore see a complete old
-or new snapshot without racing the scenario writer.
+- subset command: 3 phases and 12 batches;
+- `RunAll`: 12 phases and 48 batches.
 
-The initial ScenarioTest coverage batch has a strict barrier: attempt one
-property mutation for every randomized object, wait 15 seconds, then compare
-every successfully mutated object and report all failures together.
-Repetitions 1–3 retain fail-fast behavior.
+Scenario traffic starts only after qualification reports zero defects.
 
-ScenarioTest creates its 235 mail contacts and 267 distribution groups once,
-then reuses those same ledger-owned objects across all applicable phases.
-Objects advance only after the previous phase passed comparison; failed objects
-are not replaced with newly provisioned objects.
-
-The mutation/comparison barrier applies to every scenario and phase. A later
-batch starts only after the current batch passes comparison, and a later phase
-starts only after all four batches of the current phase pass. Repairs resume
-the failed step at its saved object position without replaying completed
-objects or skipping forward.
-
-During an active batch, `status.json` and `checkpoint.json` expose the current
-stage plus live `ObjectsAttempted/ObjectCount` and
-`ObjectsCompared/ObjectsToCompare` counters. Monitors should report these as
-`m/N` progress rather than only saying that scenario traffic is running.
-
-For monitoring, use `Get-DirectoryObjectStoreScenarioStatus.ps1`. The harness
-atomically refreshes the bounded `status.json` file at every checkpoint and on
-terminal completion, so a reporter does not need to parse growing JSONL logs.
-If the expected PID exits, the monitor reads `summary.json`, the `PAUSED` marker,
-and only the last eight event/error lines to report the terminal result promptly.
-
-## Dry run
-
-Exercises scheduling, checkpointing, random traffic selection, validation queues, and cleanup without changing AD:
+For read-only environment checking:
 
 ```powershell
 .\Invoke-DirectoryObjectStoreLongevity.ps1 `
-    -DurationHours 0.01 `
-    -OperationsPerSecond 5 `
-    -InitialRecipientCount 5 `
-    -InitialGroupCount 2 `
-    -WhatIfTraffic `
-    -CleanupOnSuccess
+    -WorkloadMode ScenarioTest `
+    -ScenarioCommand Group-Upsert `
+    -PreflightOnly `
+    -Organization contoso.com `
+    -ObjectPrefix DOSPreflight
 ```
 
-## One-hour TDS shakedown
+## Monitoring and reporting
 
-The first real run should be short:
+Default reporting cadence:
+
+1. Report every two minutes during bootstrap and the first ten traffic
+   minutes.
+2. After ten stable traffic minutes, report every five minutes.
+3. Return to two-minute reporting after a failure, repair, resume, or material
+   regression.
+
+A user-requested interval overrides these defaults. If the user requests
+separate initial and steady-state intervals, use both requested values.
+
+Every report includes:
+
+- local time with UTC offset and UTC time;
+- run ID, exact PID, process start time, CPU, and private memory;
+- command, current phase, batch, and stage;
+- fresh population counts;
+- completed batches versus command total;
+- mutation and comparison `m/N`;
+- baseline preparation, seeding, and comparison progress for deletion;
+- operation and validation counters;
+- consistency status and new failures;
+- service, port, watermark, host-memory, and monitor health;
+- current reporting interval.
+
+Use the bounded status helper:
 
 ```powershell
-.\Invoke-DirectoryObjectStoreLongevity.ps1 `
-    -WorkloadMode Longevity `
-    -DurationHours 1 `
-    -OperationsPerSecond 0.5 `
-    -Organization <test-organization> `
-    -ObjectPrefix DOSShake `
-    -ConfigureEnvironment
+.\Get-DirectoryObjectStoreScenarioStatus.ps1 `
+    -RunDirectory C:\tds\ScenarioTest\Runs\<run-id> `
+    -ProcessId <pid> `
+    -ResumeStartedUtc <process-start-utc> `
+    -StandardErrorPath <stderr-path>
 ```
 
-`-ConfigureEnvironment` creates/checks sync cookies, enables the redundant-alias flight on both TDS variants, disables recent-ETag compare suppression, and restarts `MSExchangeDirCacheService`.
-
-If the box only has the forest-wide organization, use `-SkipDeletionOperations`. Deletion
-validation requires a tenant organization ID; this switch replaces delete traffic with updates
-while retaining recipient and group-link coverage.
-
-## 84-hour run
-
-```powershell
-.\Invoke-DirectoryObjectStoreLongevity.ps1 `
-    -WorkloadMode Longevity `
-    -DurationHours 84 `
-    -OperationsPerSecond 1 `
-    -InitialRecipientCount 50 `
-    -InitialGroupCount 10 `
-    -MaximumRecipientCount 500 `
-    -MaximumGroupCount 100 `
-    -ConvergenceDelaySeconds 300 `
-    -ValidationTimeoutSeconds 1800 `
-    -Organization <test-organization> `
-    -ObjectPrefix DOS84H `
-    -ConfigureEnvironment
-```
-
-The requested rate is a target. Exchange cmdlets and comparison calls are synchronous, so the summary records the actual achieved operations per second.
-`DurationHours` measures the traffic window after environment setup and initial-object creation complete.
-
-Each run writes both machine-readable `operations.jsonl` and a human-readable `operations.log`.
-The text log uses this format:
-
-```text
-[2026/8/23 11:26:00.013] [DOS84H-g-example] [AddGroupMember] [Member=DOS84H-c-example] [Success]
-```
+Never load complete JSONL histories during recurring monitoring. Read
+`status.json`, `checkpoint.json`, `summary.json`, and `PAUSED`; use at most a
+20-line, 256-KB tail when additional log evidence is required.
 
 ## Failure behavior
 
-For the initial coverage batch, the script completes full mutation and
-comparison accounting and reports all failures together. For repetitions 1–3,
-it pauses on the first failure. In either case it creates:
+Batch 0 attempts every object and aggregates all mutation and comparison
+failures before pausing. Batches 1-3 stop on their first failure.
 
-- `PAUSED`
-- `failure-<timestamp>\failure.json`
-- service state
-- Object Store sync-cookie state
-- an inventory of recent Directory logs
-- `operations.jsonl`
-- `validations.jsonl`
-- `checkpoint.json`
-- `summary.json`
+On failure the run preserves:
 
-The random seed and operation history allow deterministic workload replay.
+- completed object GUIDs;
+- deletion preparation and seeding progress;
+- the immutable batch plan;
+- pending validations;
+- operation and comparison evidence;
+- a `PAUSED` marker and failure bundle.
+
+Script defects may be repaired and resumed without repeating completed
+objects. Product, consistency, and environment failures remain paused for
+diagnosis.
 
 ## Resume
 
-After investigating and correcting an environmental issue, resume the ledger:
+Always resume with the original workload and command:
 
 ```powershell
 .\Invoke-DirectoryObjectStoreLongevity.ps1 `
-    -ResumeRunDirectory "<run-directory>" `
-    -DurationHours 12 `
-    -OperationsPerSecond 1 `
-    -Organization <test-organization>
+    -WorkloadMode ScenarioTest `
+    -ScenarioCommand User-Properties-Deletion `
+    -ResumeRunDirectory C:\tds\ScenarioTest\Runs\<run-id> `
+    -Organization contoso.com `
+    -ObjectPrefix <original-prefix> `
+    -Side A `
+    -ObjectStoreDestination Test
 ```
 
-Remove the `PAUSED` marker only after preserving the failure bundle. Resuming does not erase prior logs.
+The checkpoint persists `WorkloadMode` and `ScenarioCommand`. A mismatched
+resume is rejected before state restoration or traffic.
+
+Compatible resumes restore:
+
+- `scenario-target-context.clixml`, avoiding repeated target discovery;
+- `scenario-plan-pNN-bNN.json`, preserving exact object/property assignments;
+- mutation, comparison, and deletion-preparation checkpoints.
+
+Run full preflight on resume only when the failure is proven to involve the
+environment, dependencies, cookies, comparison runtime, configuration, or
+target discovery.
+
+## Run artifacts
+
+Each run directory contains:
+
+- `parameters.json`
+- `status.json`
+- `checkpoint.json`
+- `summary.json`
+- `qualification.json`
+- `qualification-progress.json`
+- `scenario-target-context.clixml`
+- `scenario-plan-pNN-bNN.json`
+- bounded/rotated operation, validation, event, and scenario-detail logs
+- `PAUSED` and `failure-<timestamp>` when a failure occurs
+
+JSON snapshots use unique temporary files and atomic same-volume replacement
+with bounded retry, so concurrent monitor reads cannot pause healthy traffic.
+
+## Timing statistics
+
+Each successful batch records `ElapsedSeconds`, including preparation,
+mutation, sync wait, and comparison. Each completed phase contains its four
+batch records.
+
+At terminal success, report:
+
+- every phase total;
+- all four batch durations;
+- upsert/deletion totals;
+- total scenario-batch time;
+- full wall-clock time;
+- any repair/resume-affected timing that should be excluded from comparison.
 
 ## Cleanup
 
-Pass `-CleanupOnSuccess` to delete only objects recorded in the run ledger. Objects are intentionally preserved after failure for investigation.
+Pass `-CleanupOnSuccess` to remove only objects recorded in that run's ledger.
+Objects are preserved after failure for diagnosis.
+
+## Advanced workloads
+
+`ScenarioCommand` applies only to `-WorkloadMode ScenarioTest`.
+
+`AttributeCoverage` is the legacy default workload and exercises a generated
+attribute catalog. `Longevity` runs a time-based production-shaped mix of
+create, update, delete, membership, and read operations.
+
+Do not resume a ScenarioTest checkpoint as `AttributeCoverage` or `Longevity`;
+workload-mode compatibility is enforced.
+
+## Copilot skill installation
+
+The canonical runbook is `SKILL.md`. For automatic discovery, the repository
+also contains:
+
+```text
+.github/skills/scenario-test-runner/SKILL.md
+```
+
+Keep the root and discoverable copies synchronized when changing the skill.

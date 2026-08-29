@@ -106,7 +106,7 @@ else
     @()
 }
 $services = @(
-    foreach ($serviceName in @("MSExchangeDirCacheService", "OLS Service"))
+    foreach ($serviceName in @("MSExchangeDirCacheService", "OLS Service", "M365DirectoryProxyService"))
     {
         $service = Get-Service $serviceName -ErrorAction SilentlyContinue
         if ($null -eq $service)
@@ -125,17 +125,29 @@ $services = @(
         }
     }
 )
-$port83Listening = try
+$listeners = try
 {
-    @(
-        [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
-            Where-Object { $_.Port -eq 83 }
-    ).Count -gt 0
+    @([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners())
 }
 catch
 {
-    $null
+    @()
 }
+$port83Listening = if ($listeners.Count -gt 0) { @($listeners | Where-Object { $_.Port -eq 83 }).Count -gt 0 } else { $null }
+$port6092Listening = if ($listeners.Count -gt 0) { @($listeners | Where-Object { $_.Port -eq 6092 }).Count -gt 0 } else { $null }
+$artifactProgress = @(
+    foreach ($name in @("status.json", "checkpoint.json", "events.jsonl", "operations.jsonl", "validations.jsonl"))
+    {
+        $path = Join-Path $RunDirectory $name
+        $item = Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
+        [ordered]@{
+            Name = $name
+            Exists = $null -ne $item
+            Length = if ($null -ne $item) { $item.Length } else { 0 }
+            LastWriteTimeUtc = if ($null -ne $item) { $item.LastWriteTimeUtc.ToString("o") } else { $null }
+        }
+    }
+)
 $statusIsFresh = $null -ne $status -and
     ($ResumeStartedUtc -le [datetime]::MinValue -or [datetime]$status.UpdatedUtc -ge $ResumeStartedUtc)
 
@@ -153,4 +165,6 @@ $statusIsFresh = $null -ne $status -and
     StandardError = $standardError
     Services = $services
     Port83Listening = $port83Listening
+    Port6092Listening = $port6092Listening
+    ArtifactProgress = $artifactProgress
 } | ConvertTo-Json -Depth 10 -Compress

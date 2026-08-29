@@ -51,6 +51,18 @@ With the current arrays, create 235 mail contacts and 267 groups.
 
 ## General Requirements
 
+The harness supports these command subsets:
+
+- `User-Upsert`: Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert.
+- `Group-Upsert`: Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert.
+- `User-Properties-Deletion`: Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion.
+- `Group-Properties-Deletion`: Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion.
+- `RunAll`: all 12 phases in canonical order.
+
+Each subset command has four batches per selected phase, for 12 batches.
+`RunAll` has 48 batches. Persist the command name in the checkpoint and reject
+a resume requested with a different command.
+
 1. Use a logged random seed so every run can be reproduced.
 2. Shuffle object order independently for each phase and repetition.
 3. Select properties without replacement for each object and batch.

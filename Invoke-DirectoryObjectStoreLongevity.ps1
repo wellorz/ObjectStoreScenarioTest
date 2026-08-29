@@ -5,6 +5,9 @@ param(
     [ValidateSet("AttributeCoverage", "Longevity", "ScenarioTest")]
     [string] $WorkloadMode = "AttributeCoverage",
 
+    [ValidateSet("User-Upsert", "Group-Upsert", "User-Properties-Deletion", "Group-Properties-Deletion", "RunAll")]
+    [string] $ScenarioCommand = "RunAll",
+
     [ValidateRange(0.001, 720)]
     [double] $DurationHours = 84,
 
@@ -88,6 +91,10 @@ $ErrorActionPreference = "Stop"
 if ($PreflightOnly -and $WorkloadMode -ne "ScenarioTest")
 {
     throw "-PreflightOnly is supported only with -WorkloadMode ScenarioTest."
+}
+if ($WorkloadMode -ne "ScenarioTest" -and $PSBoundParameters.ContainsKey("ScenarioCommand"))
+{
+    throw "-ScenarioCommand is supported only with -WorkloadMode ScenarioTest."
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputRoot))
@@ -1357,6 +1364,11 @@ function Initialize-ScenarioCounts
     $nUlpD = @($script:UserLinkPropertiesForDeletion).Count
     $nGlpD = @($script:GroupLinkPropertiesForDeletion).Count
 
+    $allUserCount = [Math]::Max($nUrpU, [Math]::Max($nUlpU, [Math]::Max($nUrpD, $nUlpD)))
+    $allGroupCount = [Math]::Max($nGrpU, [Math]::Max($nGlpU, [Math]::Max($nGrpD, $nGlpD)))
+    $includeUsers = $ScenarioCommand -in @("User-Upsert", "User-Properties-Deletion", "RunAll")
+    $includeGroups = $ScenarioCommand -in @("Group-Upsert", "Group-Properties-Deletion", "RunAll")
+
     $script:ScenarioCounts = [ordered]@{
         N_URP_U = $nUrpU
         N_GRP_U = $nGrpU
@@ -1366,12 +1378,73 @@ function Initialize-ScenarioCounts
         N_GRP_D = $nGrpD
         N_ULP_D = $nUlpD
         N_GLP_D = $nGlpD
-        N_User = [Math]::Max($nUrpU, [Math]::Max($nUlpU, [Math]::Max($nUrpD, $nUlpD)))
-        N_Groups = [Math]::Max($nGrpU, [Math]::Max($nGlpU, [Math]::Max($nGrpD, $nGlpD)))
+        N_User = if ($includeUsers) { $allUserCount } else { 0 }
+        N_Groups = if ($includeGroups) { $allGroupCount } else { 0 }
     }
 }
 
 Initialize-ScenarioCounts
+
+function Get-ScenarioCommandDefinition
+{
+    switch ($ScenarioCommand)
+    {
+        "User-Upsert" {
+            return [ordered]@{
+                EstimatedMinutes = 60
+                PhaseNames = @(
+                    "Pure User Recipient Upsert",
+                    "Pure User Link Upsert",
+                    "Mixed User Upsert")
+            }
+        }
+        "Group-Upsert" {
+            return [ordered]@{
+                EstimatedMinutes = 75
+                PhaseNames = @(
+                    "Pure Group Recipient Upsert",
+                    "Pure Group Link Upsert",
+                    "Mixed Group Upsert")
+            }
+        }
+        "User-Properties-Deletion" {
+            return [ordered]@{
+                EstimatedMinutes = 80
+                PhaseNames = @(
+                    "Pure User Recipient Deletion",
+                    "Pure User Link Deletion",
+                    "Mixed User Deletion")
+            }
+        }
+        "Group-Properties-Deletion" {
+            return [ordered]@{
+                EstimatedMinutes = 90
+                PhaseNames = @(
+                    "Pure Group Recipient Deletion",
+                    "Pure Group Link Deletion",
+                    "Mixed Group Deletion")
+            }
+        }
+        default {
+            return [ordered]@{
+                EstimatedMinutes = 300
+                PhaseNames = @(
+                    "Pure User Recipient Upsert",
+                    "Pure User Link Upsert",
+                    "Pure Group Recipient Upsert",
+                    "Pure Group Link Upsert",
+                    "Mixed User Upsert",
+                    "Mixed Group Upsert",
+                    "Pure User Recipient Deletion",
+                    "Pure User Link Deletion",
+                    "Pure Group Recipient Deletion",
+                    "Pure Group Link Deletion",
+                    "Mixed User Deletion",
+                    "Mixed Group Deletion")
+            }
+        }
+    }
+}
 
 function ConvertTo-JsonLine
 {
@@ -2171,6 +2244,9 @@ function Write-RunStatusSnapshot
         UpdatedUtc = [datetime]::UtcNow.ToString("o")
         ProcessId = $PID
         Status = $Status
+        ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
+        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { (Get-ScenarioCommandDefinition).EstimatedMinutes } else { $null }
+        ScenarioBatchTotal = if ($WorkloadMode -eq "ScenarioTest") { @((Get-ScenarioCommandDefinition).PhaseNames).Count * $script:ScenarioBatchesPerPhase } else { $null }
         StopRequested = $script:StopRequested
         Failure = $script:Failure
         Counters = $script:Counters
@@ -2193,6 +2269,7 @@ function Save-Checkpoint
     $state = [ordered]@{
         SchemaVersion = 2
         RunId = $script:RunId
+        WorkloadMode = $WorkloadMode
         RandomSeed = $RandomSeed
         SavedUtc = [datetime]::UtcNow.ToString("o")
         Counters = $script:Counters
@@ -2204,6 +2281,7 @@ function Save-Checkpoint
         ScenarioLogNextIndex = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioLogNextIndex } else { $null }
         ScenarioPlanVersion = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioPlanVersion } else { $null }
         ScenarioBatchesPerPhase = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioBatchesPerPhase } else { $null }
+        ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
         ScenarioState = $script:ScenarioState
         ScenarioCompletedObjectWork = $script:ScenarioCompletedObjectWork
         ScenarioBatchSummaries = @($script:ScenarioBatchSummaries)
@@ -2224,6 +2302,42 @@ function Restore-Checkpoint
     }
 
     $state = Get-Content -LiteralPath $script:CheckpointPath -Raw | ConvertFrom-Json
+    $checkpointWorkloadMode =
+        if ($state.PSObject.Properties.Name -contains "WorkloadMode")
+        {
+            [string]$state.WorkloadMode
+        }
+        elseif ($state.PSObject.Properties.Name -contains "ScenarioPlanVersion" -and
+            $null -ne $state.ScenarioPlanVersion -and
+            [int]$state.ScenarioPlanVersion -gt 0)
+        {
+            "ScenarioTest"
+        }
+        else
+        {
+            $savedParametersPath = Join-Path $script:RunDirectory "parameters.json"
+            if (Test-Path -LiteralPath $savedParametersPath)
+            {
+                $savedParameters = Get-Content -LiteralPath $savedParametersPath -Raw | ConvertFrom-Json
+                if ($savedParameters.PSObject.Properties.Name -contains "WorkloadMode")
+                {
+                    [string]$savedParameters.WorkloadMode
+                }
+                else
+                {
+                    $null
+                }
+            }
+            else
+            {
+                $null
+            }
+        }
+    if (-not [string]::IsNullOrWhiteSpace($checkpointWorkloadMode) -and
+        -not [string]::Equals($checkpointWorkloadMode, $WorkloadMode, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "Checkpoint workload '$checkpointWorkloadMode' is incompatible with requested workload '$WorkloadMode'. Resume with the original -WorkloadMode value or start a new run."
+    }
     if ($WorkloadMode -eq "ScenarioTest")
     {
         $checkpointPlanVersion = if ($state.PSObject.Properties.Name -contains "ScenarioPlanVersion")
@@ -2246,6 +2360,23 @@ function Restore-Checkpoint
             $checkpointBatchesPerPhase -ne $script:ScenarioBatchesPerPhase)
         {
             throw "ScenarioTest checkpoint uses an incompatible phase plan (version $checkpointPlanVersion, $checkpointBatchesPerPhase batches per phase). Start a new run; the changed phase order and batch count cannot be resumed safely."
+        }
+        $checkpointScenarioCommand =
+            if ($state.PSObject.Properties.Name -contains "ScenarioCommand")
+            {
+                [string]$state.ScenarioCommand
+            }
+            else
+            {
+                "RunAll"
+            }
+        if (-not [string]::Equals($checkpointScenarioCommand, $ScenarioCommand, [StringComparison]::OrdinalIgnoreCase))
+        {
+            throw "ScenarioTest checkpoint command '$checkpointScenarioCommand' is incompatible with requested command '$ScenarioCommand'. Resume with the original command or start a new run."
+        }
+        if ([int]$state.RandomSeed -ne $RandomSeed)
+        {
+            throw "ScenarioTest checkpoint random seed '$($state.RandomSeed)' is incompatible with requested seed '$RandomSeed'. Resume with the original -RandomSeed value or start a new run."
         }
     }
     foreach ($contact in @($state.Contacts))
@@ -2403,6 +2534,8 @@ function Initialize-RunDirectory
 
     $parameters = [ordered]@{
         WorkloadMode = $WorkloadMode
+        ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
+        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { (Get-ScenarioCommandDefinition).EstimatedMinutes } else { $null }
         DurationHours = $DurationHours
         OperationsPerSecond = $OperationsPerSecond
         InitialRecipientCount = $InitialRecipientCount
@@ -4545,6 +4678,9 @@ function Write-RunSummary
         StartedUtc = $StartedUtc.ToString("o")
         FinishedUtc = $FinishedUtc.ToString("o")
         DurationHours = [math]::Round(($FinishedUtc - $StartedUtc).TotalHours, 4)
+        ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
+        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { (Get-ScenarioCommandDefinition).EstimatedMinutes } else { $null }
+        ScenarioBatchTotal = if ($WorkloadMode -eq "ScenarioTest") { @((Get-ScenarioCommandDefinition).PhaseNames).Count * $script:ScenarioBatchesPerPhase } else { $null }
         RequestedOperationsPerSecond = $OperationsPerSecond
         ActualOperationsPerSecond = [math]::Round($script:Counters.OperationsSucceeded / $elapsedSeconds, 4)
         RandomSeed = $RandomSeed
@@ -6461,7 +6597,7 @@ function Merge-ScenarioMixedSelections
 
 function Get-ScenarioPhaseDefinitions
 {
-    return @(
+    $allPhases = @(
         [ordered]@{
             Name = "Pure User Recipient Upsert"
             EntityKind = "User"
@@ -6547,6 +6683,46 @@ function Get-ScenarioPhaseDefinitions
             LinkProperties = @($script:GroupLinkPropertiesForDeletion)
         }
     )
+    $selectedNames = @((Get-ScenarioCommandDefinition).PhaseNames)
+    return @($allPhases | Where-Object { $selectedNames -contains [string]$_.Name })
+}
+
+function Get-ScenarioQualificationFingerprint
+{
+    $phases = @(Get-ScenarioPhaseDefinitions)
+    $phaseShape = @(
+        foreach ($phase in $phases)
+        {
+            [ordered]@{
+                Name = [string]$phase.Name
+                EntityKind = [string]$phase.EntityKind
+                Operation = [string]$phase.Operation
+                RecipientProperties = @($phase.RecipientProperties)
+                LinkProperties = @($phase.LinkProperties)
+            }
+        }
+    )
+    $fingerprintInput = [ordered]@{
+        PlanVersion = $script:ScenarioPlanVersion
+        BatchesPerPhase = $script:ScenarioBatchesPerPhase
+        ScenarioCommand = $ScenarioCommand.ToUpperInvariant()
+        RandomSeed = $RandomSeed
+        UserObjects = $script:ScenarioCounts.N_User
+        GroupObjects = $script:ScenarioCounts.N_Groups
+        Phases = $phaseShape
+    }
+    $bytes = [Text.Encoding]::UTF8.GetBytes(
+        ($fingerprintInput | ConvertTo-Json -Depth 8 -Compress))
+    $hashAlgorithm = [Security.Cryptography.SHA256]::Create()
+    try
+    {
+        return [BitConverter]::ToString(
+            $hashAlgorithm.ComputeHash($bytes)).Replace("-", "").ToLowerInvariant()
+    }
+    finally
+    {
+        $hashAlgorithm.Dispose()
+    }
 }
 
 function Test-ScenarioSemanticTargets
@@ -6825,6 +7001,12 @@ function Test-ScenarioDeterministicPlanQualification
         TimestampUtc = [datetime]::UtcNow.ToString("o")
         PlanVersion = $script:ScenarioPlanVersion
         BatchesPerPhase = $script:ScenarioBatchesPerPhase
+        ScenarioCommand = $ScenarioCommand
+        RandomSeed = $RandomSeed
+        UserObjects = $script:ScenarioCounts.N_User
+        GroupObjects = $script:ScenarioCounts.N_Groups
+        PhaseNames = @($phases | ForEach-Object { [string]$_.Name })
+        QualificationFingerprint = Get-ScenarioQualificationFingerprint
         PhaseCount = $phases.Count
         SelectionCount = $selectionCount
         GeneratedValueCount = $generatedValueCount
@@ -6832,7 +7014,7 @@ function Test-ScenarioDeterministicPlanQualification
         Failures = $failures.ToArray()
     }
     $reportPath = Join-Path $script:RunDirectory "qualification.json"
-    $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+    Write-AtomicJsonSnapshot -Path $reportPath -InputObject $report -Depth 8
     Write-ScenarioQualificationProgress `
         -Stage "Completed" `
         -CompletedObjectPlans $completedObjectPlans `
@@ -6849,6 +7031,110 @@ function Test-ScenarioDeterministicPlanQualification
         ReportPath = $reportPath
         SelectionCount = $selectionCount
         GeneratedValueCount = $generatedValueCount
+    }
+}
+
+function Get-ScenarioQualificationStatus
+{
+    param([Parameter(Mandatory)] [string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path))
+    {
+        return [ordered]@{
+            Passed = $false
+            Reason = "qualification report is missing"
+        }
+    }
+
+    try
+    {
+        $qualification = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    }
+    catch
+    {
+        return [ordered]@{
+            Passed = $false
+            Reason = "qualification report is malformed: $($_.Exception.Message)"
+        }
+    }
+
+    $requiredProperties = @(
+        "PlanVersion",
+        "BatchesPerPhase",
+        "ScenarioCommand",
+        "RandomSeed",
+        "UserObjects",
+        "GroupObjects",
+        "PhaseNames",
+        "QualificationFingerprint",
+        "FailureCount")
+    $propertyNames = @(
+        $qualification.PSObject.Properties |
+            ForEach-Object { $_.Name }
+    )
+    $missingProperties = @(
+        $requiredProperties |
+            Where-Object { $propertyNames -notcontains $_ }
+    )
+    if ($missingProperties.Count -gt 0)
+    {
+        return [ordered]@{
+            Passed = $false
+            Reason = "qualification report is incomplete; missing $($missingProperties -join ', ')"
+        }
+    }
+
+    $expectedPhases = @((Get-ScenarioCommandDefinition).PhaseNames)
+    $actualPhases = @($qualification.PhaseNames)
+    $mismatches = [Collections.Generic.List[string]]::new()
+    if ([int]$qualification.PlanVersion -ne $script:ScenarioPlanVersion)
+    {
+        $mismatches.Add("plan version")
+    }
+    if ([int]$qualification.BatchesPerPhase -ne $script:ScenarioBatchesPerPhase)
+    {
+        $mismatches.Add("batches per phase")
+    }
+    if (-not [string]::Equals([string]$qualification.ScenarioCommand, $ScenarioCommand, [StringComparison]::OrdinalIgnoreCase))
+    {
+        $mismatches.Add("scenario command")
+    }
+    if ([int]$qualification.RandomSeed -ne $RandomSeed)
+    {
+        $mismatches.Add("random seed")
+    }
+    if ([int]$qualification.UserObjects -ne [int]$script:ScenarioCounts.N_User -or
+        [int]$qualification.GroupObjects -ne [int]$script:ScenarioCounts.N_Groups)
+    {
+        $mismatches.Add("population counts")
+    }
+    if (($actualPhases -join "`n") -cne ($expectedPhases -join "`n"))
+    {
+        $mismatches.Add("phase selection")
+    }
+    if (-not [string]::Equals(
+        [string]$qualification.QualificationFingerprint,
+        (Get-ScenarioQualificationFingerprint),
+        [StringComparison]::OrdinalIgnoreCase))
+    {
+        $mismatches.Add("qualification fingerprint")
+    }
+    if ([int]$qualification.FailureCount -ne 0)
+    {
+        $mismatches.Add("failure count")
+    }
+
+    return [ordered]@{
+        Passed = $mismatches.Count -eq 0
+        Reason = if ($mismatches.Count -eq 0)
+        {
+            "qualification report is compatible and zero-defect"
+        }
+        else
+        {
+            "qualification report mismatch: $($mismatches -join ', ')"
+        }
+        Report = $qualification
     }
 }
 
@@ -8622,22 +8908,20 @@ function Initialize-ScenarioPreflight
     Test-ScenarioDnPreflight
     Test-ScenarioCompareRuntimePreflight
 
-    $allNames = Get-ScenarioUniqueNames -Arrays @(
-        $script:UserRecipientPropertiesForUpsert,
-        $script:GroupRecipientPropertiesForUpsert,
-        $script:UserLinkPropertiesForUpsert,
-        $script:GroupLinkPropertiesForUpsert,
-        $script:UserRecipientPropertiesForDeletion,
-        $script:GroupRecipientPropertiesForDeletion,
-        $script:UserLinkPropertiesForDeletion,
-        $script:GroupLinkPropertiesForDeletion)
+    $selectedPhases = @(Get-ScenarioPhaseDefinitions)
+    $allNames = @(
+        $selectedPhases |
+            ForEach-Object { @($_.RecipientProperties) + @($_.LinkProperties) } |
+            Select-Object -Unique
+    )
 
     $blockers = [Collections.Generic.List[string]]::new()
-    $upsertNames = Get-ScenarioUniqueNames -Arrays @(
-        $script:UserRecipientPropertiesForUpsert,
-        $script:GroupRecipientPropertiesForUpsert,
-        $script:UserLinkPropertiesForUpsert,
-        $script:GroupLinkPropertiesForUpsert)
+    $upsertNames = @(
+        $selectedPhases |
+            Where-Object { [string]$_.Operation -eq "Upsert" } |
+            ForEach-Object { @($_.RecipientProperties) + @($_.LinkProperties) } |
+            Select-Object -Unique
+    )
     foreach ($name in $upsertNames)
     {
         if (Get-ScenarioUnsupportedUpsertAttribute -Name $name)
@@ -8751,14 +9035,9 @@ function Initialize-ScenarioPreflight
 
     $qualificationPath = Join-Path $script:RunDirectory "qualification.json"
     $reuseQualification = $false
-    if (-not [string]::IsNullOrWhiteSpace($ResumeRunDirectory) -and
-        (Test-Path -LiteralPath $qualificationPath))
+    if (-not [string]::IsNullOrWhiteSpace($ResumeRunDirectory))
     {
-        $qualification = Get-Content -LiteralPath $qualificationPath -Raw | ConvertFrom-Json
-        $reuseQualification =
-            [int]$qualification.PlanVersion -eq $script:ScenarioPlanVersion -and
-            [int]$qualification.BatchesPerPhase -eq $script:ScenarioBatchesPerPhase -and
-            [int]$qualification.FailureCount -eq 0
+        $reuseQualification = [bool](Get-ScenarioQualificationStatus -Path $qualificationPath).Passed
     }
     if ($reuseQualification)
     {
@@ -8766,6 +9045,7 @@ function Initialize-ScenarioPreflight
             QualificationPath = $qualificationPath
             PlanVersion = $script:ScenarioPlanVersion
             BatchesPerPhase = $script:ScenarioBatchesPerPhase
+            ScenarioCommand = $ScenarioCommand
         }
     }
     else
@@ -8775,6 +9055,10 @@ function Initialize-ScenarioPreflight
 
     Save-ScenarioTargetContext
     Write-RunEvent -Level "Success" -Message "ScenarioTest preflight passed." -Data @{
+        ScenarioCommand = $ScenarioCommand
+        EstimatedMinutes = (Get-ScenarioCommandDefinition).EstimatedMinutes
+        PhaseCount = @((Get-ScenarioCommandDefinition).PhaseNames).Count
+        BatchCount = @((Get-ScenarioCommandDefinition).PhaseNames).Count * $script:ScenarioBatchesPerPhase
         AttributeCount = $allNames.Count
         UserObjects = $script:ScenarioCounts.N_User
         GroupObjects = $script:ScenarioCounts.N_Groups
@@ -8787,12 +9071,38 @@ $runStartedUtc = [datetime]::UtcNow
 
 try
 {
+    if ($WorkloadMode -eq "ScenarioTest")
+    {
+        $commandDefinition = Get-ScenarioCommandDefinition
+        Write-RunEvent -Level "Information" -Message "Scenario command '$ScenarioCommand' selected." -Data @{
+            ScenarioCommand = $ScenarioCommand
+            PhaseNames = @($commandDefinition.PhaseNames)
+            EstimatedMinutes = [int]$commandDefinition.EstimatedMinutes
+            EstimatedDuration = if ([int]$commandDefinition.EstimatedMinutes -ge 60)
+            {
+                "{0:0.##} hours" -f ([int]$commandDefinition.EstimatedMinutes / 60.0)
+            }
+            else
+            {
+                "$([int]$commandDefinition.EstimatedMinutes) minutes"
+            }
+            BatchCount = @($commandDefinition.PhaseNames).Count * $script:ScenarioBatchesPerPhase
+            UserObjects = $script:ScenarioCounts.N_User
+            GroupObjects = $script:ScenarioCounts.N_Groups
+        }
+    }
     Initialize-ExchangeEnvironment
     if ($WorkloadMode -eq "ScenarioTest")
     {
         if (-not [string]::IsNullOrWhiteSpace($ResumeRunDirectory) -and
             -not $ForceFullPreflightOnResume)
         {
+            $qualificationPath = Join-Path $script:RunDirectory "qualification.json"
+            $qualificationStatus = Get-ScenarioQualificationStatus -Path $qualificationPath
+            if (-not $qualificationStatus.Passed)
+            {
+                throw "ScenarioTest resume cannot skip qualification because $($qualificationStatus.Reason). Run with -ForceFullPreflightOnResume to requalify this command."
+            }
             if (-not (Restore-ScenarioTargetContext))
             {
                 Initialize-ScenarioTargetPools
@@ -8804,6 +9114,7 @@ try
                 CurrentPhaseIndex = $script:ScenarioState.NextPhaseIndex
                 CurrentBatchIndex = $script:ScenarioState.NextBatchIndex
                 CurrentObjectPosition = @($script:ScenarioState.CurrentBatchCompletedGuids).Count
+                QualificationFingerprint = [string]$qualificationStatus.Report.QualificationFingerprint
             }
         }
         else
