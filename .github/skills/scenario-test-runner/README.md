@@ -72,6 +72,8 @@ Command: <command>
 Scenarios: <ordered scenario names>
 Estimated duration: <estimate>
 Population: <contacts/groups to create>
+Organization: <supplied-or-automatically-selected-organization>
+Object prefix: <automatically-generated-prefix>
 Monitoring: every 2 minutes for the first 10 traffic minutes, then every
 5 minutes while healthy.
 ```
@@ -94,9 +96,12 @@ repair can add time.
 - Use a dedicated, unique object prefix.
 
 When the user does not specify an organization, the skill discovers eligible
-test organizations from the default authoritative `Get-AcceptedDomain` result
-on the selected TDS and automatically uses it when exactly one is available.
-It asks only if discovery returns none or remains ambiguous.
+Exchange organizations with `Get-Organization`. It prefers a valid
+active `contoso.com` organization with a `UserMailbox`; otherwise it
+deterministically uses the first active, non-system organization with a
+`UserMailbox`. It never treats the forest's default `Get-AcceptedDomain` value
+as the tenant. If no eligible organization exists, the run stops with a
+prerequisite error instead of asking the user to choose from system tenants.
 
 `User` means a mail-contact recipient created by this harness. It does not
 mean an AD user or mailbox user. `Group` means a distribution group created by

@@ -57,20 +57,58 @@ user to approve or edit it unless they explicitly supplied a prefix.
 Resolve the organization without prompting when possible:
 
 1. Use the organization explicitly supplied by the user.
-2. Otherwise query the selected TDS with:
+2. Otherwise prefer `contoso.com` when it is a valid Exchange organization
+   with at least one mailbox.
+3. If `contoso.com` is unavailable, choose the first eligible non-system
+   organization, sorted by name, that has at least one mailbox:
    ```powershell
-   $organizations = @(
-       Get-AcceptedDomain |
-           Where-Object { $_.Default -eq $true -and $_.DomainType -eq "Authoritative" } |
-           ForEach-Object { $_.DomainName.ToString() } |
-           Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-           Select-Object -Unique
-   )
+   $Organization = $null
+   $preferred = Get-Organization -Identity "contoso.com" -ErrorAction SilentlyContinue
+   if ($null -ne $preferred -and
+       $preferred.OrganizationStatus.ToString() -eq "Active")
+   {
+       $mailbox = Get-Mailbox -Organization "contoso.com" -ResultSize Unlimited `
+           -ErrorAction SilentlyContinue |
+           Where-Object { $_.RecipientTypeDetails -eq "UserMailbox" } |
+           Select-Object -First 1
+       if ($null -ne $mailbox)
+       {
+           $Organization = "contoso.com"
+       }
+   }
+
+   if ([string]::IsNullOrWhiteSpace($Organization))
+   {
+       $Organization = Get-Organization -ResultSize Unlimited |
+           Where-Object {
+               $name = [string]$_.Name
+               $_.OrganizationStatus.ToString() -eq "Active" -and
+               $name -notmatch "^(sct-|DirSyncSystemTenant-)" -and
+               $name -notmatch "\.templateTenant$" -and
+               $name -notmatch "\.exchangemon\.net$"
+           } |
+           Sort-Object Name |
+           ForEach-Object {
+               $name = [string]$_.Name
+               $mailbox = Get-Mailbox -Organization $name -ResultSize Unlimited `
+                   -ErrorAction SilentlyContinue |
+                   Where-Object { $_.RecipientTypeDetails -eq "UserMailbox" } |
+                   Select-Object -First 1
+               if ($null -ne $mailbox)
+               {
+                   $name
+               }
+           } |
+           Select-Object -First 1
+   }
    ```
-3. If exactly one eligible organization is found, use it automatically and
-   report the selection.
-4. Ask the user only when no organization can be found or multiple eligible
-   organizations remain after filtering.
+4. If no eligible organization exists, stop and report the missing
+   prerequisite. Do not ask the user to choose from system, synthetic,
+   monitoring, forest-domain, or template tenants.
+
+`Get-AcceptedDomain` is not organization discovery. Its default authoritative
+domain can be the TDS forest domain, which `Get-Organization -Identity` cannot
+use as a tenant.
 
 Likewise, use an explicitly supplied TDS machine or the active TDS machine.
 Ask only when neither is available or the target is ambiguous. Do not ask for

@@ -72,9 +72,10 @@ User-Upsert on SG2TDSO3000036 for contoso.com
 ```
 
 The skill announces the selected scenarios, expected population, estimated
-duration, automatically discovered organization, generated unique object
-prefix, and monitoring cadence before starting. Users are not prompted to
-choose an object prefix.
+duration, automatically selected Exchange organization, generated unique
+object prefix, and monitoring cadence before starting. It prefers a valid
+`contoso.com` tenant and does not prompt users to choose a prefix or select
+from system tenants.
 
 For direct PowerShell use, the scripts are located at:
 
