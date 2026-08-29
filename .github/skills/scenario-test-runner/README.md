@@ -12,13 +12,13 @@ advanced use.
 
 Users can invoke the skill with one of these exact command names:
 
-| Command | Scenarios | Fresh population | Full estimate | Full batches |
+| Command | Scenarios | Fresh population | `--miniSet` | `--full` |
 | --- | --- | ---: | ---: | ---: |
-| `User-Upsert` | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert | 235 contacts | about 1 hour | 12 |
-| `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 267 groups | about 75 minutes | 12 |
-| `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | 235 contacts | about 80 minutes | 12 |
-| `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 267 groups | about 90 minutes | 12 |
-| `RunAll` | All 12 scenarios in canonical order | 235 contacts and 267 groups | about 5 hours | 48 |
+| `User-Upsert` | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert | 235 contacts | about 5 minutes | about 60 minutes |
+| `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 267 groups | about 5 minutes | about 75 minutes |
+| `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | 235 contacts | about 10 minutes | about 80 minutes |
+| `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 267 groups | about 10 minutes | about 95 minutes |
+| `RunAll` | All 12 scenarios in canonical order | 235 contacts and 267 groups | about 25 minutes | about 305 minutes |
 
 ## Set modes
 
@@ -110,10 +110,15 @@ The estimates describe expected scenario execution on a healthy TDS machine.
 Initial preflight, exhaustive qualification, environment repair, or a script
 repair can add time.
 
-Mini-set estimates are derived as one quarter of the full estimate, rounded
-up: 15 minutes for `User-Upsert`, 19 for `Group-Upsert`, 20 for
-`User-Properties-Deletion`, 23 for `Group-Properties-Deletion`, and 75 for
-`RunAll`.
+The estimates use the measured timings from the completed 48-batch run.
+Mini-set sums the three or twelve batch-0 durations; full sums all applicable
+scenario totals. Each value is rounded upward to the next five minutes:
+
+- `User-Upsert`: 5 minutes mini-set, 60 minutes full;
+- `Group-Upsert`: 5 minutes mini-set, 75 minutes full;
+- `User-Properties-Deletion`: 10 minutes mini-set, 80 minutes full;
+- `Group-Properties-Deletion`: 10 minutes mini-set, 95 minutes full;
+- `RunAll`: 25 minutes mini-set, 305 minutes full.
 
 ## Prerequisites
 

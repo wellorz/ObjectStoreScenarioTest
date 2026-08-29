@@ -13,13 +13,13 @@ Execute `ScenarioTest.md` and `Invoke-DirectoryObjectStoreLongevity.ps1` as an o
 Treat any of these exact, case-insensitive command names as a request to start
 the corresponding ScenarioTest subset:
 
-| Command | Scenarios | Population | Full estimate | Full batches |
+| Command | Scenarios | Population | `--miniSet` | `--full` |
 | --- | --- | ---: | ---: | ---: |
-| `User-Upsert` | Pure User Recipient Upsert; Pure User Link Upsert; Mixed User Upsert | 235 contacts | about 1 hour | 12 |
-| `Group-Upsert` | Pure Group Recipient Upsert; Pure Group Link Upsert; Mixed Group Upsert | 267 groups | about 75 minutes | 12 |
-| `User-Properties-Deletion` | Pure User Recipient Deletion; Pure User Link Deletion; Mixed User Deletion | 235 contacts | about 80 minutes | 12 |
-| `Group-Properties-Deletion` | Pure Group Recipient Deletion; Pure Group Link Deletion; Mixed Group Deletion | 267 groups | about 90 minutes | 12 |
-| `RunAll` | All 12 scenarios in canonical order | 235 contacts and 267 groups | about 5 hours | 48 |
+| `User-Upsert` | Pure User Recipient Upsert; Pure User Link Upsert; Mixed User Upsert | 235 contacts | about 5 minutes | about 60 minutes |
+| `Group-Upsert` | Pure Group Recipient Upsert; Pure Group Link Upsert; Mixed Group Upsert | 267 groups | about 5 minutes | about 75 minutes |
+| `User-Properties-Deletion` | Pure User Recipient Deletion; Pure User Link Deletion; Mixed User Deletion | 235 contacts | about 10 minutes | about 80 minutes |
+| `Group-Properties-Deletion` | Pure Group Recipient Deletion; Pure Group Link Deletion; Mixed Group Deletion | 267 groups | about 10 minutes | about 95 minutes |
+| `RunAll` | All 12 scenarios in canonical order | 235 contacts and 267 groups | about 25 minutes | about 305 minutes |
 
 Each command accepts one optional mode modifier:
 
@@ -168,8 +168,10 @@ Mode-specific totals:
 - `RunAll --full` or plain `RunAll`: 48 batches;
 - `RunAll --miniSet`: 12 batches.
 
-Mini-set estimates are one quarter of the corresponding full estimate, rounded
-up. They remain estimates; environment preflight and repair can add time.
+The estimates come from measured phase totals: mini-set uses the sum of batch
+0, while full uses the sum of all four batches. Each result is rounded upward
+to the next five minutes. Environment preflight, bootstrap, and repair can add
+time.
 
 ## Discoverability and helper skills
 

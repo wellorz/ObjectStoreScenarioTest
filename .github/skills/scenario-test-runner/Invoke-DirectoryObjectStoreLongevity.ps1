@@ -1398,7 +1398,8 @@ function Get-ScenarioCommandDefinition
     {
         "User-Upsert" {
             return [ordered]@{
-                EstimatedMinutes = 60
+                FullEstimatedMinutes = 60
+                MiniSetEstimatedMinutes = 5
                 PhaseNames = @(
                     "Pure User Recipient Upsert",
                     "Pure User Link Upsert",
@@ -1407,7 +1408,8 @@ function Get-ScenarioCommandDefinition
         }
         "Group-Upsert" {
             return [ordered]@{
-                EstimatedMinutes = 75
+                FullEstimatedMinutes = 75
+                MiniSetEstimatedMinutes = 5
                 PhaseNames = @(
                     "Pure Group Recipient Upsert",
                     "Pure Group Link Upsert",
@@ -1416,7 +1418,8 @@ function Get-ScenarioCommandDefinition
         }
         "User-Properties-Deletion" {
             return [ordered]@{
-                EstimatedMinutes = 80
+                FullEstimatedMinutes = 80
+                MiniSetEstimatedMinutes = 10
                 PhaseNames = @(
                     "Pure User Recipient Deletion",
                     "Pure User Link Deletion",
@@ -1425,7 +1428,8 @@ function Get-ScenarioCommandDefinition
         }
         "Group-Properties-Deletion" {
             return [ordered]@{
-                EstimatedMinutes = 90
+                FullEstimatedMinutes = 95
+                MiniSetEstimatedMinutes = 10
                 PhaseNames = @(
                     "Pure Group Recipient Deletion",
                     "Pure Group Link Deletion",
@@ -1434,7 +1438,8 @@ function Get-ScenarioCommandDefinition
         }
         default {
             return [ordered]@{
-                EstimatedMinutes = 300
+                FullEstimatedMinutes = 305
+                MiniSetEstimatedMinutes = 25
                 PhaseNames = @(
                     "Pure User Recipient Upsert",
                     "Pure User Link Upsert",
@@ -1455,13 +1460,12 @@ function Get-ScenarioCommandDefinition
 
 function Get-ScenarioEstimatedMinutes
 {
-    $fullEstimate = [int](Get-ScenarioCommandDefinition).EstimatedMinutes
     if ($ScenarioSetMode -eq "MiniSet")
     {
-        return [int][math]::Ceiling($fullEstimate / 4.0)
+        return [int](Get-ScenarioCommandDefinition).MiniSetEstimatedMinutes
     }
 
-    return $fullEstimate
+    return [int](Get-ScenarioCommandDefinition).FullEstimatedMinutes
 }
 
 function ConvertTo-JsonLine
