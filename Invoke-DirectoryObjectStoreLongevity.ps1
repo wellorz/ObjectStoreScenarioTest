@@ -77,6 +77,8 @@ param(
 
     [switch] $PreflightOnly,
 
+    [switch] $ForceFullPreflightOnResume,
+
     [switch] $WhatIfTraffic
 )
 
@@ -153,8 +155,9 @@ $script:ScenarioLogSegments = [ordered]@{
 $script:ScenarioLogNextIndex = @{}
 $script:ScenarioTotalObjectWork = 0L
 $script:ScenarioCompletedObjectWork = 0L
-$script:ScenarioPlanVersion = 3
-$script:ScenarioBatchesPerPhase = 3
+$script:ScenarioPlanVersion = 4
+$script:ScenarioBatchesPerPhase = 4
+$script:ScenarioBatchFailures = [Collections.Generic.List[object]]::new()
 $script:ScenarioState = [ordered]@{
     NextPhaseIndex = 0
     NextBatchIndex = 0
@@ -1837,6 +1840,10 @@ function ConvertTo-ScenarioLogValue
     {
         return "[redacted:sid]"
     }
+    if ($Value -is [Security.AccessControl.ObjectSecurity])
+    {
+        return ConvertTo-ScenarioLogValue -Value $Value.GetSecurityDescriptorBinaryForm()
+    }
     if ($Value -is [string])
     {
         if ($Value -match "(?i)(^|,|\s)DC=" -or $Value -match "(?i)^(S:|X509:|Kerberos:)")
@@ -1862,7 +1869,11 @@ function ConvertTo-ScenarioLogValue
     {
         return @($Value | ForEach-Object { ConvertTo-ScenarioLogValue -Value $_ })
     }
-    return $Value
+    if ($Value -is [ValueType])
+    {
+        return $Value
+    }
+    return "[redacted:object:type=$($Value.GetType().FullName)]"
 }
 
 function Write-ScenarioDetail
@@ -2096,6 +2107,56 @@ function ConvertTo-EntityRecord
     }
 }
 
+function Write-AtomicJsonSnapshot
+{
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [object] $InputObject,
+        [Parameter(Mandatory)] [int] $Depth)
+
+    $temporaryPath = "{0}.{1}.{2}.tmp" -f $Path, $PID, ([Guid]::NewGuid().ToString("N"))
+    $backupPath = "{0}.{1}.{2}.backup" -f $Path, $PID, ([Guid]::NewGuid().ToString("N"))
+    $maximumAttempts = 20
+    try
+    {
+        $InputObject | ConvertTo-Json -Depth $Depth | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+        for ($attempt = 1; $attempt -le $maximumAttempts; $attempt++)
+        {
+            try
+            {
+                if (Test-Path -LiteralPath $Path)
+                {
+                    [IO.File]::Replace($temporaryPath, $Path, $backupPath, $true)
+                }
+                else
+                {
+                    Move-Item -LiteralPath $temporaryPath -Destination $Path -ErrorAction Stop
+                }
+                return
+            }
+            catch [IO.IOException]
+            {
+                if ($attempt -eq $maximumAttempts)
+                {
+                    throw
+                }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+    }
+    finally
+    {
+        if (Test-Path -LiteralPath $temporaryPath)
+        {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+        if ((Test-Path -LiteralPath $backupPath) -and (Test-Path -LiteralPath $Path))
+        {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Write-RunStatusSnapshot
 {
     param([string] $Status)
@@ -2124,9 +2185,7 @@ function Write-RunStatusSnapshot
             $null
         }
     }
-    $temporaryPath = "$($script:StatusPath).tmp"
-    $snapshot | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
-    Move-Item -LiteralPath $temporaryPath -Destination $script:StatusPath -Force
+    Write-AtomicJsonSnapshot -Path $script:StatusPath -InputObject $snapshot -Depth 8
 }
 
 function Save-Checkpoint
@@ -2152,9 +2211,7 @@ function Save-Checkpoint
         Failure = $script:Failure
     }
 
-    $temporaryPath = "$($script:CheckpointPath).tmp"
-    $state | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
-    Move-Item -LiteralPath $temporaryPath -Destination $script:CheckpointPath -Force
+    Write-AtomicJsonSnapshot -Path $script:CheckpointPath -InputObject $state -Depth 12
     $script:LastCheckpointUtc = [datetime]::UtcNow
     Write-RunStatusSnapshot
 }
@@ -2227,9 +2284,13 @@ function Restore-Checkpoint
     }
     if ($state.PSObject.Properties.Name -contains "ScenarioLogNextIndex" -and $null -ne $state.ScenarioLogNextIndex)
     {
+        $restoredLogIndexNames = @(
+            $state.ScenarioLogNextIndex.PSObject.Properties |
+                ForEach-Object { $_.Name }
+        )
         foreach ($key in @($script:ScenarioLogNextIndex.Keys))
         {
-            if ($state.ScenarioLogNextIndex.PSObject.Properties.Name -contains $key)
+            if ($restoredLogIndexNames -contains $key)
             {
                 $script:ScenarioLogNextIndex[$key] = [math]::Max(
                     [int]$script:ScenarioLogNextIndex[$key],
@@ -2981,7 +3042,11 @@ function Initialize-ExchangeEnvironment
         "Set-ADObject")
     if ($WorkloadMode -eq "ScenarioTest")
     {
-        $requiredCommands += @("Get-ADObject", "Get-ADRootDSE", "Get-AccountPartition")
+        $requiredCommands += @(
+            "Get-ADObject",
+            "Get-ADRootDSE",
+            "Get-AccountPartition",
+            "Get-EmailAddressPolicy")
     }
 
     $missing = @($requiredCommands | Where-Object { $null -eq (Get-Command $_ -ErrorAction SilentlyContinue) })
@@ -3028,7 +3093,7 @@ function Initialize-ExchangeEnvironment
         $organization = Get-Organization -Identity $Organization -ErrorAction Stop
         $script:TenantId = [Guid]$organization.ExternalDirectoryOrganizationId
 
-        $groupOwner = Get-Recipient -Organization $Organization -ResultSize Unlimited -ErrorAction Stop |
+        $groupOwner = Get-Mailbox -Organization $Organization -ResultSize Unlimited -ErrorAction Stop |
             Where-Object { [string]$_.RecipientTypeDetails -eq "UserMailbox" } |
             Sort-Object PrimarySmtpAddress |
             Select-Object -First 1
@@ -3161,7 +3226,21 @@ function Get-SyncCookieWatermarks
     {
         if ([string]$cookie.Side -ieq [string]$Side)
         {
-            $watermarks[[string]$cookie.DataType] = if ($null -ne $cookie.Timestamp) { ([datetime]$cookie.Timestamp).ToUniversalTime() } else { [datetime]::MinValue }
+            $lastProcessedProperty = $cookie.PSObject.Properties["WhenDirSyncLastProcessedUTC"]
+            $timestampProperty = $cookie.PSObject.Properties["Timestamp"]
+            $watermarks[[string]$cookie.DataType] =
+                if ($null -ne $lastProcessedProperty -and $null -ne $lastProcessedProperty.Value)
+                {
+                    ([datetime]$lastProcessedProperty.Value).ToUniversalTime()
+                }
+                elseif ($null -ne $timestampProperty -and $null -ne $timestampProperty.Value)
+                {
+                    ([datetime]$timestampProperty.Value).ToUniversalTime()
+                }
+                else
+                {
+                    [datetime]::MinValue
+                }
         }
     }
     return $watermarks
@@ -3657,93 +3736,6 @@ function New-CoverageAttributeValue
     }
 }
 
-function Test-MaterialRangedAttributeTelemetryAfter
-{
-    param([Parameter(Mandatory)] [datetime] $NotBeforeUtc)
-
-    if ($WhatIfTraffic)
-    {
-        return $false
-    }
-
-    $timestampPattern = "^(?<TimestampUtc>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z),"
-    foreach ($logFile in @(
-        Get-ChildItem "D:\DirectoryLogs\ObjectStoreDirSync\ObjectStoreDirSyncEngineLog" -File -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending |
-            Select-Object -First 4
-    ))
-    {
-        $stream = $null
-        $reader = $null
-        try
-        {
-            $stream = [IO.FileStream]::new(
-                $logFile.FullName,
-                [IO.FileMode]::Open,
-                [IO.FileAccess]::Read,
-                [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
-            $reader = [IO.StreamReader]::new($stream)
-            while (($line = $reader.ReadLine()) -ne $null)
-            {
-                if ($line.Contains("Found RecipientChange.MaterialRangedAttr.") -and
-                    $line -match $timestampPattern)
-                {
-                    $timestampUtc = [datetime]::MinValue
-                    if ([datetime]::TryParse(
-                        $Matches.TimestampUtc,
-                        [Globalization.CultureInfo]::InvariantCulture,
-                        [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal,
-                        [ref]$timestampUtc) -and
-                        $timestampUtc -ge $NotBeforeUtc)
-                    {
-                        return $true
-                    }
-                }
-            }
-        }
-        catch [IO.IOException]
-        {
-            continue
-        }
-        finally
-        {
-            if ($reader)
-            {
-                $reader.Dispose()
-            }
-            elseif ($stream)
-            {
-                $stream.Dispose()
-            }
-        }
-    }
-
-    return $false
-}
-
-function Wait-MaterialRangedAttributeTelemetry
-{
-    param([Parameter(Mandatory)] [datetime] $NotBeforeUtc)
-
-    if ($WhatIfTraffic)
-    {
-        return $true
-    }
-
-    $deadlineUtc = [datetime]::UtcNow.AddSeconds(30)
-    do
-    {
-        if (Test-MaterialRangedAttributeTelemetryAfter -NotBeforeUtc $NotBeforeUtc)
-        {
-            return $true
-        }
-        Start-Sleep -Seconds 2
-    }
-    while ([datetime]::UtcNow -lt $deadlineUtc)
-
-    return $false
-}
-
 function Set-CoverageAttribute
 {
     param(
@@ -3865,8 +3857,6 @@ function Invoke-AttributeCoveragePhase
     {
         $validationGuids = [Collections.Generic.List[Guid]]::new()
         $rangedMutationCount = 0
-        $rangedTelemetryStartUtc = [datetime]::UtcNow
-
         foreach ($entity in @($script:Contacts.Values))
         {
             $plan = $recipientPlans[[string]$entity.Identity]
@@ -3910,18 +3900,6 @@ function Invoke-AttributeCoveragePhase
         if ($script:StopRequested)
         {
             return
-        }
-
-        if (-not $WhatIfTraffic -and $rangedMutationCount -gt 0)
-        {
-            if (-not (Wait-MaterialRangedAttributeTelemetry -NotBeforeUtc $rangedTelemetryStartUtc))
-            {
-                Stop-LongevityTraffic `
-                    -Category "RangedAttributeProtectionNotObserved" `
-                    -Message "msExchMultiMailboxDatabasesLink changed and compared, but the material ranged-attribute protection branch was not observed." `
-                    -Data @{ Phase = $Phase; Round = $round; MutationCount = $rangedMutationCount }
-                return
-            }
         }
 
         Write-RunEvent -Level "Success" -Message "$Phase attribute round $($round + 1) passed Compare Engine validation." -Data @{
@@ -4152,8 +4130,25 @@ function Complete-Validation
     }
 }
 
+function Add-ScenarioBatchFailure
+{
+    param(
+        [Parameter(Mandatory)] [string] $Category,
+        [Parameter(Mandatory)] [string] $Message,
+        [hashtable] $Data = @{})
+
+    $script:ScenarioBatchFailures.Add([ordered]@{
+        TimestampUtc = [datetime]::UtcNow.ToString("o")
+        Category = $Category
+        Message = $Message
+        Data = $Data
+    })
+}
+
 function Invoke-DueValidations
 {
+    param([switch] $AggregateFailures)
+
     if ($WhatIfTraffic)
     {
         foreach ($item in @($script:PendingValidations.Values))
@@ -4201,6 +4196,15 @@ function Invoke-DueValidations
                 MutationUtc = $item.MutationUtc
                 Watermarks = $watermarks
             }
+            if ($AggregateFailures)
+            {
+                [void]$script:PendingValidations.Remove([string]$item.Guid)
+                Add-ScenarioBatchFailure -Category "SyncProgressTimeout" -Message "Object Store sync cookies did not advance past the mutation time for $($item.Identity)." -Data @{
+                    Validation = $item
+                    Watermarks = $watermarks
+                }
+                continue
+            }
             Stop-LongevityTraffic -Category "SyncProgressTimeout" -Message "Object Store sync cookies did not advance past the mutation time for $($item.Identity)." -Data @{
                 Validation = $item
                 Watermarks = $watermarks
@@ -4228,6 +4232,15 @@ function Invoke-DueValidations
                     if ((ConvertFrom-IsoUtc -Value ([string]$item.DeadlineUtc)) -le $now)
                     {
                         Complete-Validation -Item $item -Status "Failed" -Details @{ Result = $result }
+                        if ($AggregateFailures)
+                        {
+                            [void]$script:PendingValidations.Remove([string]$item.Guid)
+                            Add-ScenarioBatchFailure -Category "ConsistencyFailure" -Message "AD-to-L2 comparison did not converge for $($item.Identity)." -Data @{
+                                Validation = $item
+                                CompareResult = $result
+                            }
+                            continue
+                        }
                         Stop-LongevityTraffic -Category "ConsistencyFailure" -Message "AD-to-L2 comparison did not converge for $($item.Identity)." -Data @{ Validation = $item; CompareResult = $result }
                         return
                     }
@@ -4253,6 +4266,15 @@ function Invoke-DueValidations
                     if ((ConvertFrom-IsoUtc -Value ([string]$item.DeadlineUtc)) -le $now)
                     {
                         Complete-Validation -Item $item -Status "Failed" -Details $itemResult
+                        if ($AggregateFailures)
+                        {
+                            [void]$script:PendingValidations.Remove([string]$item.Guid)
+                            Add-ScenarioBatchFailure -Category "ConsistencyFailure" -Message "AD-to-L2 comparison did not converge for $($item.Identity)." -Data @{
+                                Validation = $item
+                                CompareResult = $itemResult
+                            }
+                            continue
+                        }
                         Stop-LongevityTraffic -Category "ConsistencyFailure" -Message "AD-to-L2 comparison did not converge for $($item.Identity)." -Data @{
                             Validation = $item
                             CompareResult = $itemResult
@@ -4280,6 +4302,15 @@ function Invoke-DueValidations
                 if ((ConvertFrom-IsoUtc -Value ([string]$item.DeadlineUtc)) -le $now)
                 {
                     Complete-Validation -Item $item -Status "Failed" -Details $result
+                    if ($AggregateFailures)
+                    {
+                        [void]$script:PendingValidations.Remove([string]$item.Guid)
+                        Add-ScenarioBatchFailure -Category "DeletionConsistencyFailure" -Message "Deletion did not converge for $($item.Identity)." -Data @{
+                            Validation = $item
+                            CompareResult = $result
+                        }
+                        continue
+                    }
                     Stop-LongevityTraffic -Category "DeletionConsistencyFailure" -Message "Deletion did not converge for $($item.Identity)." -Data @{ Validation = $item; CompareResult = $result }
                     return
                 }
@@ -4535,7 +4566,10 @@ function Write-RunSummary
         ScenarioCompletedObjectWork = $script:ScenarioCompletedObjectWork
         Failure = $script:Failure
     }
-    $summary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $script:RunDirectory "summary.json") -Encoding UTF8
+    Write-AtomicJsonSnapshot `
+        -Path (Join-Path $script:RunDirectory "summary.json") `
+        -InputObject $summary `
+        -Depth 8
     Write-RunStatusSnapshot -Status $Status
 }
 
@@ -4548,6 +4582,23 @@ function ConvertTo-ScenarioBoolean
         return [bool]$Value
     }
     return "$Value" -match "^(?i:true|1|yes)$"
+}
+
+function ConvertTo-ScenarioGuid
+{
+    param(
+        [Parameter(Mandatory)] [object] $Value,
+        [Parameter(Mandatory)] [string] $Context)
+
+    $values = @($Value)
+    $guid = [Guid]::Empty
+    if ($values.Count -ne 1 -or
+        -not [Guid]::TryParse([string]$values[0], [ref]$guid) -or
+        $guid -eq [Guid]::Empty)
+    {
+        throw "Scenario $Context must contain exactly one non-empty GUID; received $($values.Count) value(s)."
+    }
+    return $guid
 }
 
 function Get-ScenarioUniqueNames
@@ -4715,6 +4766,43 @@ function Get-ScenarioResultLimitParameter
         return "ResultSetSize"
     }
     return $null
+}
+
+function Test-ScenarioSyntheticCommandValueShapes
+{
+    $singleBinary = ConvertTo-ScenarioCommandValue -Value ([byte[]](1, 2, 3, 4))
+    if ($singleBinary -isnot [byte[]] -or $singleBinary.Length -ne 4)
+    {
+        throw "Synthetic ScenarioTest single binary command-value shape test failed."
+    }
+
+    $multiBinaryInput = [byte[][]]@(
+        [byte[]](1, 2),
+        [byte[]](3, 4))
+    $multiBinary = ConvertTo-ScenarioCommandValue -Value $multiBinaryInput
+    if ($multiBinary -isnot [byte[][]] -or
+        $multiBinary.Length -ne 2 -or
+        $multiBinary[0] -isnot [byte[]] -or
+        $multiBinary[1] -isnot [byte[]])
+    {
+        throw "Synthetic ScenarioTest multivalue binary command-value shape test failed."
+    }
+
+    $multiInteger = ConvertTo-ScenarioCommandValue -Value ([int[]](775, 791))
+    if ($multiInteger -isnot [object[]] -or
+        $multiInteger -is [int[]] -or
+        $multiInteger.Length -ne 2 -or
+        $multiInteger[0] -isnot [int] -or
+        $multiInteger[1] -isnot [int])
+    {
+        throw "Synthetic ScenarioTest multivalue integer command-value shape test failed."
+    }
+
+    Write-RunEvent -Level "Information" -Message "Synthetic ScenarioTest command-value shape test passed." -Data @{
+        SingleBinaryType = $singleBinary.GetType().FullName
+        MultiBinaryType = $multiBinary.GetType().FullName
+        MultiIntegerType = $multiInteger.GetType().FullName
+    }
 }
 
 function Get-ScenarioTargetQueryParameters
@@ -5069,12 +5157,44 @@ function Test-ScenarioSyntheticValueBounds
         RangeUpper = 5
         RangeLower = 1
     }
+    $configurationXmlMetadata = [ordered]@{
+        Name = "msExchConfigurationXML"
+        AttributeSyntax = "2.5.5.12"
+        IsSingleValued = $true
+        RangeUpper = 100000
+        RangeLower = 0
+    }
+    $sharingAnonymousMetadata = [ordered]@{
+        Name = "msExchSharingAnonymousIdentities"
+        AttributeSyntax = "2.5.5.17"
+        IsSingleValued = $false
+        RangeUpper = 0
+        RangeLower = 0
+    }
     $initialsRandom = [Random]::new(1729)
     $initials = New-ScenarioTypedValue -Metadata $initialsMetadata -Entity $entity -Random $initialsRandom
     $planType = New-ScenarioTypedValue -Metadata $planTypeMetadata -Entity $entity -Random ([Random]::new(1729))
+    $configurationXml = New-ScenarioTypedValue -Metadata $configurationXmlMetadata -Entity $entity -Random ([Random]::new(1729))
+    $sharingAnonymousValues = @(New-ScenarioTypedValues `
+        -Metadata $sharingAnonymousMetadata `
+        -Entity $entity `
+        -Random ([Random]::new(1729)))
+    try
+    {
+        $configurationDocument = [xml]$configurationXml
+    }
+    catch
+    {
+        throw "Synthetic ScenarioTest configuration XML generation produced invalid XML: $($_.Exception.Message)"
+    }
     if ($initials.Length -lt 1 -or $initials.Length -gt 6 -or
         $planType.Length -lt 1 -or $planType.Length -gt 5 -or
-        $initials -cnotmatch "^[A-Z0-9]+$" -or $planType -cnotmatch "^[A-Z0-9]+$")
+        $initials -cnotmatch "^[A-Z0-9]+$" -or $planType -cnotmatch "^[A-Z0-9]+$" -or
+        $configurationDocument.DocumentElement.LocalName -ne "UserConfig" -or
+        $sharingAnonymousValues.Count -lt 1 -or
+        @($sharingAnonymousValues | Where-Object {
+            [string]$_ -notmatch "^calendar\\[0-9a-fA-F-]{36}:[A-Za-z0-9]+$"
+        }).Count -gt 0)
     {
         throw "Synthetic ScenarioTest bounded string generation failed."
     }
@@ -5083,6 +5203,8 @@ function Test-ScenarioSyntheticValueBounds
         InitialsLength = $initials.Length
         MailboxPlanType = $planType
         MailboxPlanTypeLength = $planType.Length
+        ConfigurationXmlRoot = $configurationDocument.DocumentElement.LocalName
+        SharingAnonymousIdentityCount = $sharingAnonymousValues.Count
     }
 }
 
@@ -5102,13 +5224,34 @@ function Test-ScenarioSyntheticSidValue
     $sid = [Security.Principal.SecurityIdentifier]::new("S-1-5-21-3111111111-2222222222-3333333333-1729")
     $bytes = New-ScenarioTypedValue -Metadata $metadata -Entity $entity -Random ([Random]::new(1729)) -ObjectSid (ConvertTo-ScenarioSidBytes -Value $sid)
     $roundTrip = [Security.Principal.SecurityIdentifier]::new([byte[]]$bytes, 0)
-    if ($bytes -isnot [byte[]] -or $roundTrip.Value -ne $sid.Value)
+    $valueArray = @(ConvertTo-ScenarioValueArray -Value $bytes)
+    $sidHistoryMetadata = [ordered]@{
+        Name = "msExchSIDHistory"
+        AttributeSyntax = "2.5.5.17"
+        IsSingleValued = $false
+        RangeUpper = 0
+        RangeLower = 0
+    }
+    $sidHistoryValues = @(New-ScenarioTypedValues `
+        -Metadata $sidHistoryMetadata `
+        -Entity $entity `
+        -Random ([Random]::new(1729)) `
+        -ObjectSid (ConvertTo-ScenarioSidBytes -Value $sid))
+    if ($bytes -isnot [byte[]] -or
+        $roundTrip.Value -ne $sid.Value -or
+        $valueArray.Count -ne 1 -or
+        $valueArray[0] -isnot [byte[]] -or
+        $sidHistoryValues.Count -lt 1 -or
+        @($sidHistoryValues | Where-Object {
+            $_ -isnot [Security.Principal.SecurityIdentifier]
+        }).Count -gt 0)
     {
         throw "Synthetic ScenarioTest SID generation failed."
     }
     Write-RunEvent -Level "Information" -Message "Synthetic ScenarioTest SID generation test passed." -Data @{
         Sid = $roundTrip.Value
         ByteCount = $bytes.Length
+        SidHistoryCount = $sidHistoryValues.Count
     }
 }
 
@@ -5254,6 +5397,28 @@ function Add-ScenarioTarget
     }
 }
 
+function Add-ScenarioGuidTarget
+{
+    param(
+        [Parameter(Mandatory)] [string] $Bucket,
+        [object] $Value)
+
+    $guid = [Guid]::Empty
+    if ($null -eq $Value -or -not [Guid]::TryParse([string]$Value, [ref]$guid) -or $guid -eq [Guid]::Empty)
+    {
+        return
+    }
+    if (-not $script:ScenarioTargets.ContainsKey($Bucket))
+    {
+        $script:ScenarioTargets[$Bucket] = [Collections.Generic.List[string]]::new()
+    }
+    $guidText = $guid.ToString()
+    if (-not ($script:ScenarioTargets[$Bucket] -contains $guidText))
+    {
+        $script:ScenarioTargets[$Bucket].Add($guidText)
+    }
+}
+
 function ConvertTo-ScenarioSidBytes
 {
     param([object] $Value)
@@ -5324,7 +5489,10 @@ function Initialize-ScenarioTargetPools
 {
     Write-RunEvent -Level "Information" -Message "Starting ScenarioTest target-pool initialization." -Data @{}
     $script:ScenarioTargets = @{}
-    foreach ($bucket in @("Recipient", "Group", "Mailbox", "Database", "Policy", "AddressBook", "Server", "Computer", "Configuration", "Sid"))
+    foreach ($bucket in @(
+        "Recipient", "Group", "Mailbox", "Database", "Policy", "PolicyGuid",
+        "AddressBook", "Server", "Mta", "Computer", "Configuration",
+        "ConfigurationUnit", "OrganizationRoot", "Sid"))
     {
         if ($bucket -eq "Sid")
         {
@@ -5339,10 +5507,14 @@ function Initialize-ScenarioTargetPools
 
     if ($WhatIfTraffic)
     {
-        foreach ($bucket in @("Recipient", "Group", "Mailbox", "Database", "Policy", "AddressBook", "Server", "Computer", "Configuration"))
+        foreach ($bucket in @(
+            "Recipient", "Group", "Mailbox", "Database", "Policy", "AddressBook",
+            "Server", "Mta", "Computer", "Configuration", "ConfigurationUnit",
+            "OrganizationRoot"))
         {
             Add-ScenarioTarget -Bucket $bucket -Object "CN=ScenarioTarget-$bucket,DC=whatif,DC=local"
         }
+        Add-ScenarioGuidTarget -Bucket "PolicyGuid" -Value ([Guid]::NewGuid())
         $sidBytes = New-Object byte[] 28
         ([Security.Principal.SecurityIdentifier]::new("S-1-5-21-100-200-300-400")).GetBinaryForm($sidBytes, 0)
         $script:ScenarioTargets.Sid.Add($sidBytes)
@@ -5376,10 +5548,15 @@ function Initialize-ScenarioTargetPools
     {
         try
         {
-            $adObject = Get-ADObject -Identity ([Guid]$mailbox.Guid) -Properties DistinguishedName,objectSid -ErrorAction Stop
+            $adObject = Get-ADObject -Identity ([Guid]$mailbox.Guid) `
+                -Properties DistinguishedName,objectSid,homeMTA,msExchCU,msExchOURoot `
+                -ErrorAction Stop
             Add-ScenarioTarget -Bucket "Mailbox" -Object $adObject -ResolveDistinguishedName
             Add-ScenarioTarget -Bucket "Recipient" -Object $adObject -ResolveDistinguishedName
             Add-ScenarioSidTarget -Value $adObject.objectSid
+            Add-ScenarioTarget -Bucket "Mta" -Object $adObject.homeMTA
+            Add-ScenarioTarget -Bucket "ConfigurationUnit" -Object $adObject.msExchCU
+            Add-ScenarioTarget -Bucket "OrganizationRoot" -Object $adObject.msExchOURoot
         }
         catch
         {
@@ -5418,12 +5595,29 @@ function Initialize-ScenarioTargetPools
             else
             {
                 Add-ScenarioTarget -Bucket "Policy" -Object $target -ResolveDistinguishedName
+                Add-ScenarioGuidTarget -Bucket "PolicyGuid" -Value $target.Guid
             }
         }
+    }
+    foreach ($policy in @(Get-ScenarioCommandOutput -CommandName "Get-EmailAddressPolicy" -ResultLimit 10 | Select-Object -First 10))
+    {
+        Add-ScenarioTarget -Bucket "Policy" -Object $policy -ResolveDistinguishedName
+        Add-ScenarioGuidTarget -Bucket "PolicyGuid" -Value $policy.Guid
     }
     foreach ($server in @(Get-ScenarioCommandOutput -CommandName "Get-ExchangeServer" -ResultLimit 10 | Select-Object -First 10))
     {
         Add-ScenarioTarget -Bucket "Server" -Object $server -ResolveDistinguishedName
+    }
+    try
+    {
+        $configurationNamingContext = [string](Get-ADRootDSE -ErrorAction Stop).configurationNamingContext
+        foreach ($mta in @(Get-ADObject -SearchBase $configurationNamingContext -LDAPFilter "(objectClass=mTA)" -ResultSetSize 10 -ErrorAction Stop))
+        {
+            Add-ScenarioTarget -Bucket "Mta" -Object $mta -ResolveDistinguishedName
+        }
+    }
+    catch
+    {
     }
     foreach ($computer in @(Get-ScenarioCommandOutput -CommandName "Get-ADComputer" -ResultLimit 10 | Select-Object -First 10))
     {
@@ -5463,6 +5657,44 @@ function Initialize-ScenarioTargetPools
     }
 }
 
+function Save-ScenarioTargetContext
+{
+    $path = Join-Path $script:RunDirectory "scenario-target-context.clixml"
+    $temporaryPath = "$path.tmp"
+    [ordered]@{
+        PlanVersion = $script:ScenarioPlanVersion
+        Organization = $Organization
+        ForestFqdn = $script:ForestFqdn
+        Targets = $script:ScenarioTargets
+    } | Export-Clixml -LiteralPath $temporaryPath -Depth 10
+    Move-Item -LiteralPath $temporaryPath -Destination $path -Force
+}
+
+function Restore-ScenarioTargetContext
+{
+    $path = Join-Path $script:RunDirectory "scenario-target-context.clixml"
+    if (-not (Test-Path -LiteralPath $path))
+    {
+        return $false
+    }
+
+    $context = Import-Clixml -LiteralPath $path
+    if ([int]$context.PlanVersion -ne $script:ScenarioPlanVersion -or
+        -not [string]::Equals([string]$context.Organization, $Organization, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([string]$context.ForestFqdn, $script:ForestFqdn, [StringComparison]::OrdinalIgnoreCase) -or
+        $context.Targets -isnot [System.Collections.IDictionary])
+    {
+        return $false
+    }
+
+    $script:ScenarioTargets = $context.Targets
+    Write-RunEvent -Level "Information" -Message "Restored cached ScenarioTest runtime target context." -Data @{
+        ContextPath = $path
+        PlanVersion = $script:ScenarioPlanVersion
+    }
+    return $true
+}
+
 function Get-ScenarioTargetBucket
 {
     param([Parameter(Mandatory)] [string] $Name)
@@ -5470,6 +5702,18 @@ function Get-ScenarioTargetBucket
     if ($Name -eq "msExchMultiMailboxDatabasesLink" -or $Name -match "(?i)(MailboxMove|ArchiveDatabase|SourceMDB|TargetMDB)")
     {
         return "Database"
+    }
+    if ($Name -ieq "msExchCU")
+    {
+        return "ConfigurationUnit"
+    }
+    if ($Name -ieq "msExchOURoot")
+    {
+        return "OrganizationRoot"
+    }
+    if ($Name -ieq "homeMTA")
+    {
+        return "Mta"
     }
     if ($Name -match "(?i)(AddressBook|showInAddressBook)")
     {
@@ -5539,6 +5783,10 @@ function Get-ScenarioGeneratorKind
     if ($name -eq "msExchMultiMailboxDatabasesLink")
     {
         return "MailboxDatabaseLink"
+    }
+    if ($name -ieq "msExchSharingAnonymousIdentities")
+    {
+        return "String"
     }
     if ($name -match "(?i)SID")
     {
@@ -5615,6 +5863,28 @@ function Initialize-ScenarioCertificate
     {
         return
     }
+    if (-not [string]::IsNullOrWhiteSpace($ResumeRunDirectory))
+    {
+        $certificateRecord = @(
+            $script:ScenarioSupportingObjects |
+                Where-Object { [string]$_.Kind -eq "Certificate" } |
+                Select-Object -Last 1
+        )
+        if ($certificateRecord.Count -eq 1)
+        {
+            $certificatePath = Join-Path ([string]$certificateRecord[0].StorePath) ([string]$certificateRecord[0].Thumbprint)
+            if (Test-Path -LiteralPath $certificatePath)
+            {
+                $certificate = Get-Item -LiteralPath $certificatePath -ErrorAction Stop
+                $script:ScenarioTargets.CertificateBytes = $certificate.Export(
+                    [Security.Cryptography.X509Certificates.X509ContentType]::Cert)
+                $script:ScenarioTargets.CertificateSubject = [string]$certificate.Subject
+                $script:ScenarioTargets.CertificateIssuer = [string]$certificate.Issuer
+                return
+            }
+        }
+        throw "The resumed scenario could not restore its ledger-owned certificate."
+    }
     $certificateCommand = Get-Command "New-SelfSignedCertificate" -ErrorAction SilentlyContinue
     if ($null -eq $certificateCommand)
     {
@@ -5682,7 +5952,22 @@ function New-ScenarioStringValue
         "(?i)^legacyExchangeDN$" { "/o=Scenario/ou=Exchange Administrative Group/cn=Recipients/cn=$token"; break }
         "(?i)^msExchLabeledURI$" { "https://example.invalid/$token"; break }
         "(?i)^textEncodedORAddress$" { "/o=Scenario/ou=Exchange Administrative Group/cn=Recipients/cn=$token"; break }
-        "(?i)^msExchConfigurationXML$" { "<Scenario id='$token' />"; break }
+        "(?i)^msExchConfigurationXML$" { "<UserConfig><ProvisioningOption>$token</ProvisioningOption></UserConfig>"; break }
+        "(?i)^msExchSharingAnonymousIdentities$" {
+            $urlId = [Guid]::new([byte[]](New-ScenarioGuidBytes -Random $Random))
+            $folderId = New-ScenarioToken -Random $Random -Length 64
+            "calendar\$urlId`:$folderId"
+            break
+        }
+        "(?i)^msExchPolicies(Included|Excluded)$" {
+            if (-not $script:ScenarioTargets.ContainsKey("PolicyGuid") -or
+                $script:ScenarioTargets.PolicyGuid.Count -eq 0)
+            {
+                throw "Attribute '$Name' requires a valid policy object GUID, but no policy target is available."
+            }
+            Get-RandomScenarioItem -Items $script:ScenarioTargets.PolicyGuid -Random $Random
+            break
+        }
         "(?i)^AltSecurityIdentities$" {
             if ($script:ScenarioTargets.ContainsKey("CertificateSubject"))
             {
@@ -5708,6 +5993,29 @@ function New-ScenarioStringValue
         $value = $value.Substring(0, $limit)
     }
     return $value
+}
+
+function New-ScenarioBoundedIntegerValue
+{
+    param(
+        [Parameter(Mandatory)] [Random] $Random,
+        [Parameter(Mandatory)] [int64] $Minimum,
+        [Parameter(Mandatory)] [int64] $Maximum)
+
+    if ($Maximum -lt $Minimum)
+    {
+        throw "Integer range is invalid: minimum $Minimum exceeds maximum $Maximum."
+    }
+
+    $sampleMinimum = [int64][math]::Max($Minimum, -1000000L)
+    $sampleMaximum = [int64][math]::Min($Maximum, 1000000L)
+    if ($sampleMinimum -gt $sampleMaximum)
+    {
+        return $Minimum
+    }
+
+    $sampleWidth = $sampleMaximum - $sampleMinimum + 1
+    return $sampleMinimum + [int64]$Random.Next(0, [int]$sampleWidth)
 }
 
 function New-ScenarioToken
@@ -5782,15 +6090,27 @@ function New-ScenarioTypedValue
             return "S:$($stringValue.Length):${stringValue}:$targetDn"
         }
         "Sid" {
+            $sidBytes = if ($null -ne $ObjectSid -and $ObjectSid -is [byte[]])
+            {
+                ,([byte[]]$ObjectSid)
+            }
+            elseif ($script:ScenarioTargets.Sid.Count -gt 0)
+            {
+                ,([byte[]](Get-RandomScenarioItem -Items $script:ScenarioTargets.Sid -Random $Random))
+            }
+            else
+            {
+                throw "Attribute '$name' requires a valid SID value, but no SID target is available."
+            }
+            if ($name -ieq "msExchSIDHistory")
+            {
+                return [Security.Principal.SecurityIdentifier]::new($sidBytes, 0)
+            }
             if ($null -ne $ObjectSid -and $ObjectSid -is [byte[]])
             {
                 return ,([byte[]]$ObjectSid)
             }
-            if ($script:ScenarioTargets.Sid.Count -eq 0)
-            {
-                throw "Attribute '$name' requires a valid SID value, but no SID target is available."
-            }
-            return ,([byte[]](Get-RandomScenarioItem -Items $script:ScenarioTargets.Sid -Random $Random))
+            return ,$sidBytes
         }
         "SecurityDescriptor" {
             return ,(New-ScenarioSecurityDescriptorBytes)
@@ -5821,9 +6141,32 @@ function New-ScenarioTypedValue
             {
                 return [int32]840
             }
+            if ($name -ieq "msExchLocalizationFlags")
+            {
+                return [int32]$Random.Next(0, 2)
+            }
+            if ([int64]$Metadata.RangeLower -ne 0 -or [int64]$Metadata.RangeUpper -ne 0)
+            {
+                $value = New-ScenarioBoundedIntegerValue `
+                    -Random $Random `
+                    -Minimum ([int64]$Metadata.RangeLower) `
+                    -Maximum ([int64]$Metadata.RangeUpper)
+                if ($value -lt [int32]::MinValue -or $value -gt [int32]::MaxValue)
+                {
+                    throw "Attribute '$name' has an integer range outside Int32 limits."
+                }
+                return [int32]$value
+            }
             return [int32]($Random.Next(0, 1000))
         }
         "LargeInteger" {
+            if ([int64]$Metadata.RangeLower -ne 0 -or [int64]$Metadata.RangeUpper -ne 0)
+            {
+                return [int64](New-ScenarioBoundedIntegerValue `
+                    -Random $Random `
+                    -Minimum ([int64]$Metadata.RangeLower) `
+                    -Maximum ([int64]$Metadata.RangeUpper))
+            }
             return [int64]$Random.Next(1, 1000000)
         }
         "DateTime" {
@@ -5861,6 +6204,22 @@ function New-ScenarioGuidBytes
     return ,$bytes
 }
 
+function Test-ScenarioSingleValuedForEntity
+{
+    param(
+        [Parameter(Mandatory)] [System.Collections.IDictionary] $Metadata,
+        [Parameter(Mandatory)] [object] $Entity)
+
+    $kindProperty = $Entity.PSObject.Properties["Kind"]
+    if ($null -ne $kindProperty -and
+        [string]$kindProperty.Value -eq "Group" -and
+        [string]$Metadata.Name -ieq "description")
+    {
+        return $true
+    }
+    return ConvertTo-ScenarioBoolean $Metadata.IsSingleValued
+}
+
 function New-ScenarioTypedValues
 {
     param(
@@ -5869,7 +6228,8 @@ function New-ScenarioTypedValues
         [Parameter(Mandatory)] [Random] $Random,
         [object] $ObjectSid)
 
-    $count = if (ConvertTo-ScenarioBoolean $Metadata.IsSingleValued)
+    $isSingleValued = Test-ScenarioSingleValuedForEntity -Metadata $Metadata -Entity $Entity
+    $count = if ($isSingleValued)
     {
         1
     }
@@ -5888,7 +6248,7 @@ function New-ScenarioTypedValues
             $values.Add($value)
         }
     }
-    if (ConvertTo-ScenarioBoolean $Metadata.IsSingleValued)
+    if ($isSingleValued)
     {
         return ,$values[0]
     }
@@ -5959,11 +6319,12 @@ function Select-ScenarioProperties
         [Parameter(Mandatory)] [int] $Width,
         [Parameter(Mandatory)] [Random] $Random)
 
-    if ($Properties.Count -eq 0)
+    $propertyArray = @($Properties)
+    if ($propertyArray.Count -eq 0)
     {
         return @()
     }
-    $shuffled = Get-ShuffledScenarioArray -Items $Properties -Random $Random
+    $shuffled = Get-ShuffledScenarioArray -Items $propertyArray -Random $Random
     $selected = [Collections.Generic.List[string]]::new()
     $limit = [math]::Min($Width, $shuffled.Count)
     for ($index = 0; $index -lt $limit; $index++)
@@ -5979,11 +6340,12 @@ function Get-ScenarioInitialSelection
         [object[]] $PropertyOrder = @(),
         [Parameter(Mandatory)] [int] $Position)
 
-    if ($PropertyOrder.Count -eq 0)
+    $propertyArray = @($PropertyOrder)
+    if ($propertyArray.Count -eq 0)
     {
         return @()
     }
-    return @([string]$PropertyOrder[($Position - 1) % $PropertyOrder.Count])
+    return @([string]$propertyArray[($Position - 1) % $propertyArray.Count])
 }
 
 function Merge-ScenarioMixedSelections
@@ -6187,6 +6549,309 @@ function Get-ScenarioPhaseDefinitions
     )
 }
 
+function Test-ScenarioSemanticTargets
+{
+    if ($WhatIfTraffic)
+    {
+        Write-RunEvent -Level "Information" -Message "Skipped live ScenarioTest semantic target binding in WhatIf mode." -Data @{
+            BindingPerformed = $false
+        }
+        return
+    }
+
+    $requirements = @(
+        [ordered]@{ Bucket = "ConfigurationUnit"; ObjectClass = "msExchConfigurationUnitContainer" }
+        [ordered]@{ Bucket = "OrganizationRoot"; ObjectClass = "organizationalUnit" }
+        [ordered]@{ Bucket = "Mta"; ObjectClass = "mTA" }
+    )
+    $failures = [Collections.Generic.List[object]]::new()
+    foreach ($requirement in $requirements)
+    {
+        foreach ($targetDn in @($script:ScenarioTargets[$requirement.Bucket]))
+        {
+            try
+            {
+                $target = Get-ADObject -Identity $targetDn -Properties objectClass -ErrorAction Stop
+                $classes = @($target.objectClass | ForEach-Object { [string]$_ })
+                if (-not ($classes -contains [string]$requirement.ObjectClass))
+                {
+                    $failures.Add([ordered]@{
+                        Bucket = $requirement.Bucket
+                        Target = $targetDn
+                        ExpectedObjectClass = $requirement.ObjectClass
+                        ActualObjectClasses = $classes
+                    })
+                }
+            }
+            catch
+            {
+                $failures.Add([ordered]@{
+                    Bucket = $requirement.Bucket
+                    Target = $targetDn
+                    ExpectedObjectClass = $requirement.ObjectClass
+                    Error = Get-ScenarioExceptionChain -Exception $_.Exception
+                })
+            }
+        }
+    }
+
+    foreach ($policyGuid in @($script:ScenarioTargets.PolicyGuid))
+    {
+        try
+        {
+            [void](Get-ADObject -Identity ([Guid]$policyGuid) -ErrorAction Stop)
+        }
+        catch
+        {
+            $failures.Add([ordered]@{
+                Bucket = "PolicyGuid"
+                Target = $policyGuid
+                Error = Get-ScenarioExceptionChain -Exception $_.Exception
+            })
+        }
+    }
+
+    if ($failures.Count -gt 0)
+    {
+        throw "Scenario semantic target qualification failed: $($failures | ConvertTo-Json -Depth 5 -Compress)"
+    }
+
+    Write-RunEvent -Level "Success" -Message "ScenarioTest semantic target qualification passed." -Data @{
+        ConfigurationUnitTargets = $script:ScenarioTargets.ConfigurationUnit.Count
+        OrganizationRootTargets = $script:ScenarioTargets.OrganizationRoot.Count
+        MtaTargets = $script:ScenarioTargets.Mta.Count
+        PolicyGuidTargets = $script:ScenarioTargets.PolicyGuid.Count
+    }
+}
+
+function Write-ScenarioQualificationProgress
+{
+    param(
+        [Parameter(Mandatory)] [string] $Stage,
+        [string] $Phase,
+        [int] $PhaseIndex = -1,
+        [int] $BatchIndex = -1,
+        [int] $Position = 0,
+        [int] $ObjectCount = 0,
+        [long] $CompletedObjectPlans = 0,
+        [long] $TotalObjectPlans = 0,
+        [long] $SelectionCount = 0,
+        [long] $GeneratedValueCount = 0,
+        [int] $FailureCount = 0)
+
+    $progress = [ordered]@{
+        UpdatedUtc = [datetime]::UtcNow.ToString("o")
+        Stage = $Stage
+        Phase = $Phase
+        PhaseIndex = $PhaseIndex
+        BatchIndex = $BatchIndex
+        Position = $Position
+        ObjectCount = $ObjectCount
+        CompletedObjectPlans = $CompletedObjectPlans
+        TotalObjectPlans = $TotalObjectPlans
+        PercentComplete = if ($TotalObjectPlans -gt 0)
+        {
+            [math]::Round(($CompletedObjectPlans * 100.0) / $TotalObjectPlans, 2)
+        }
+        else
+        {
+            0
+        }
+        SelectionCount = $SelectionCount
+        GeneratedValueCount = $GeneratedValueCount
+        FailureCount = $FailureCount
+    }
+    Write-AtomicJsonSnapshot `
+        -Path (Join-Path $script:RunDirectory "qualification-progress.json") `
+        -InputObject $progress `
+        -Depth 4
+}
+
+function Test-ScenarioDeterministicPlanQualification
+{
+    $failures = [Collections.Generic.List[object]]::new()
+    $generatedValueCount = 0L
+    $selectionCount = 0L
+    $phases = @(Get-ScenarioPhaseDefinitions)
+    $totalObjectPlans = 0L
+    foreach ($phase in $phases)
+    {
+        $objectCount = if ([string]$phase.EntityKind -eq "User")
+        {
+            [int]$script:ScenarioCounts.N_User
+        }
+        else
+        {
+            [int]$script:ScenarioCounts.N_Groups
+        }
+        $totalObjectPlans += [long]$objectCount * $script:ScenarioBatchesPerPhase
+    }
+    $completedObjectPlans = 0L
+    Write-ScenarioQualificationProgress `
+        -Stage "DeterministicPlan" `
+        -CompletedObjectPlans 0 `
+        -TotalObjectPlans $totalObjectPlans
+
+    foreach ($phaseIndex in 0..($phases.Count - 1))
+    {
+        $phase = $phases[$phaseIndex]
+        $objectCount = if ([string]$phase.EntityKind -eq "User")
+        {
+            [int]$script:ScenarioCounts.N_User
+        }
+        else
+        {
+            [int]$script:ScenarioCounts.N_Groups
+        }
+
+        foreach ($batchIndex in 0..($script:ScenarioBatchesPerPhase - 1))
+        {
+            $isInitial = $batchIndex -eq 0
+            $random = New-ScenarioRandom -PhaseIndex $phaseIndex -BatchIndex $batchIndex
+            $recipientOrder = @(
+                if (@($phase.RecipientProperties).Count -gt 0)
+                {
+                    Get-ShuffledScenarioArray -Items @($phase.RecipientProperties) -Random $random
+                }
+            )
+            $linkOrder = @(
+                if (@($phase.LinkProperties).Count -gt 0)
+                {
+                    Get-ShuffledScenarioArray -Items @($phase.LinkProperties) -Random $random
+                }
+            )
+
+            for ($position = 1; $position -le $objectCount; $position++)
+            {
+                if ($isInitial)
+                {
+                    $recipientSelection = @(Get-ScenarioInitialSelection -PropertyOrder $recipientOrder -Position $position)
+                    $linkSelection = @(Get-ScenarioInitialSelection -PropertyOrder $linkOrder -Position $position)
+                }
+                else
+                {
+                    $objectRandom = New-ScenarioRandom -PhaseIndex $phaseIndex -BatchIndex $batchIndex -Salt $position
+                    $recipientWidth = if ($recipientOrder.Count -gt 0) { 1 + ($position % $recipientOrder.Count) } else { 0 }
+                    $linkWidth = if ($linkOrder.Count -gt 0) { 1 + ($position % $linkOrder.Count) } else { 0 }
+                    $recipientSelection = @(Select-ScenarioProperties -Properties @($phase.RecipientProperties) -Width $recipientWidth -Random $objectRandom)
+                    $linkSelection = @(Select-ScenarioProperties -Properties @($phase.LinkProperties) -Width $linkWidth -Random $objectRandom)
+                }
+
+                $selection = if ($recipientOrder.Count -gt 0 -and $linkOrder.Count -gt 0)
+                {
+                    Merge-ScenarioMixedSelections `
+                        -RecipientSelection $recipientSelection `
+                        -LinkSelection $linkSelection `
+                        -FullRecipientOrder $recipientOrder `
+                        -FullLinkOrder $linkOrder `
+                        -RequireDistinct $true
+                }
+                else
+                {
+                    [ordered]@{ Recipient = $recipientSelection; Link = $linkSelection }
+                }
+
+                $entity = [pscustomobject]@{
+                    Name = "Qualification-$($phase.EntityKind)-$position"
+                    Guid = [Guid]::NewGuid()
+                    Kind = [string]$phase.EntityKind
+                }
+                $valueRandom = New-ScenarioRandom -PhaseIndex $phaseIndex -BatchIndex $batchIndex -Salt ($position * 13)
+                foreach ($name in @($selection.Recipient) + @($selection.Link))
+                {
+                    $selectionCount++
+                    try
+                    {
+                        $metadata = Get-ScenarioAttributeMetadata -Name $name
+                        $objectSid = if ($script:ScenarioTargets.Sid.Count -gt 0) { $script:ScenarioTargets.Sid[0] } else { $null }
+                        $values = @(New-ScenarioTypedValues -Metadata $metadata -Entity $entity -Random $valueRandom -ObjectSid $objectSid)
+                        if ($values.Count -eq 0)
+                        {
+                            throw "generator returned no values."
+                        }
+                        foreach ($value in $values)
+                        {
+                            if ($null -eq $value)
+                            {
+                                throw "generator returned a null value."
+                            }
+                            if ($value -is [string] -and [int64]$metadata.RangeUpper -gt 0 -and
+                                $value.Length -gt [int64]$metadata.RangeUpper)
+                            {
+                                throw "generated string exceeds rangeUpper $($metadata.RangeUpper)."
+                            }
+                            $policyGuid = [Guid]::Empty
+                            if ($name -match "(?i)^msExchPolicies(Included|Excluded)$" -and
+                                -not [Guid]::TryParse([string]$value, [ref]$policyGuid))
+                            {
+                                throw "generated policy value '$value' is not a GUID."
+                            }
+                            $generatedValueCount++
+                        }
+                    }
+                    catch
+                    {
+                        $failures.Add([ordered]@{
+                            Phase = [string]$phase.Name
+                            PhaseIndex = $phaseIndex
+                            Batch = $batchIndex
+                            Position = $position
+                            Property = [string]$name
+                            Error = Get-ScenarioExceptionChain -Exception $_.Exception
+                        })
+                    }
+                }
+                $completedObjectPlans++
+                if (($position % 10) -eq 0 -or $position -eq $objectCount)
+                {
+                    Write-ScenarioQualificationProgress `
+                        -Stage "DeterministicPlan" `
+                        -Phase ([string]$phase.Name) `
+                        -PhaseIndex $phaseIndex `
+                        -BatchIndex $batchIndex `
+                        -Position $position `
+                        -ObjectCount $objectCount `
+                        -CompletedObjectPlans $completedObjectPlans `
+                        -TotalObjectPlans $totalObjectPlans `
+                        -SelectionCount $selectionCount `
+                        -GeneratedValueCount $generatedValueCount `
+                        -FailureCount $failures.Count
+                }
+            }
+        }
+    }
+
+    $report = [ordered]@{
+        TimestampUtc = [datetime]::UtcNow.ToString("o")
+        PlanVersion = $script:ScenarioPlanVersion
+        BatchesPerPhase = $script:ScenarioBatchesPerPhase
+        PhaseCount = $phases.Count
+        SelectionCount = $selectionCount
+        GeneratedValueCount = $generatedValueCount
+        FailureCount = $failures.Count
+        Failures = $failures.ToArray()
+    }
+    $reportPath = Join-Path $script:RunDirectory "qualification.json"
+    $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+    Write-ScenarioQualificationProgress `
+        -Stage "Completed" `
+        -CompletedObjectPlans $completedObjectPlans `
+        -TotalObjectPlans $totalObjectPlans `
+        -SelectionCount $selectionCount `
+        -GeneratedValueCount $generatedValueCount `
+        -FailureCount $failures.Count
+    if ($failures.Count -gt 0)
+    {
+        throw "Scenario deterministic-plan qualification found $($failures.Count) harness defects. See $reportPath."
+    }
+
+    Write-RunEvent -Level "Success" -Message "ScenarioTest deterministic-plan qualification passed." -Data @{
+        ReportPath = $reportPath
+        SelectionCount = $selectionCount
+        GeneratedValueCount = $generatedValueCount
+    }
+}
+
 function ConvertTo-ScenarioValueKey
 {
     param([object] $Value)
@@ -6235,10 +6900,17 @@ function Get-ScenarioCurrentValues
         return $values
     }
 
-    $adObject = Get-ScenarioAdObject -Entity $Entity -Properties $Names
-    foreach ($name in @($Names))
+    $uniqueNames = @($Names | Select-Object -Unique)
+    $propertyBatchSize = 16
+    for ($offset = 0; $offset -lt $uniqueNames.Count; $offset += $propertyBatchSize)
     {
-        $values[$name] = @(Get-ScenarioAttributeValues -AdObject $adObject -Name $name)
+        $lastIndex = [math]::Min($offset + $propertyBatchSize - 1, $uniqueNames.Count - 1)
+        $propertyBatch = @($uniqueNames[$offset..$lastIndex])
+        $adObject = Get-ScenarioAdObject -Entity $Entity -Properties $propertyBatch
+        foreach ($name in $propertyBatch)
+        {
+            $values[$name] = @(Get-ScenarioAttributeValues -AdObject $adObject -Name $name)
+        }
     }
     return $values
 }
@@ -6344,6 +7016,169 @@ function Add-ScenarioPendingValidation
     }
 }
 
+function Get-ScenarioOperationValueTypeKey
+{
+    param([Parameter(Mandatory)] [object] $Value)
+
+    if ($Value -is [byte[]])
+    {
+        return "System.Byte[]"
+    }
+    if ($Value -is [Collections.IEnumerable] -and -not ($Value -is [string]))
+    {
+        $elementTypes = @($Value |
+            ForEach-Object {
+                if ($_ -is [byte[]])
+                {
+                    "System.Byte[]"
+                }
+                elseif ($null -eq $_)
+                {
+                    "<null>"
+                }
+                else
+                {
+                    $_.GetType().FullName
+                }
+            } |
+            Select-Object -Unique |
+            Sort-Object)
+        return "$($Value.GetType().FullName)<$($elementTypes -join ',')>"
+    }
+    return $Value.GetType().FullName
+}
+
+function ConvertTo-ScenarioCommandValue
+{
+    param([Parameter(Mandatory)] [object] $Value)
+
+    if ($Value -is [byte[]])
+    {
+        return ,([byte[]]$Value)
+    }
+    if ($Value -is [string] -or -not ($Value -is [Collections.IEnumerable]))
+    {
+        return $Value
+    }
+
+    $items = @($Value)
+    if ($items.Count -eq 0)
+    {
+        return ,([object[]]@())
+    }
+    $elementType = $items[0].GetType()
+    if (@($items | Where-Object { $null -eq $_ -or $_.GetType() -ne $elementType }).Count -gt 0)
+    {
+        return ,([object[]]$items)
+    }
+
+    if ($elementType.IsValueType)
+    {
+        return ,([object[]]$items)
+    }
+    $typedArray = [Array]::CreateInstance($elementType, $items.Count)
+    for ($index = 0; $index -lt $items.Count; $index++)
+    {
+        $typedArray.SetValue($items[$index], $index)
+    }
+    return ,$typedArray
+}
+
+function New-ScenarioLdapRequestBatches
+{
+    param(
+        [hashtable] $Add = @{},
+        [hashtable] $Replace = @{},
+        [hashtable] $Remove = @{},
+        [string[]] $Clear = @(),
+        [hashtable] $GeneratedValues = @{},
+        [int] $MaximumAttributeCount = 16)
+
+    $modifications = [Collections.Generic.List[object]]::new()
+    foreach ($name in @($Add.Keys))
+    {
+        $value = ConvertTo-ScenarioCommandValue -Value $Add[$name]
+        $modifications.Add([pscustomobject]@{
+            Name = [string]$name
+            Operation = "Add"
+            Value = $value
+            TypeKey = Get-ScenarioOperationValueTypeKey -Value $value
+        })
+    }
+    foreach ($name in @($Replace.Keys))
+    {
+        $value = ConvertTo-ScenarioCommandValue -Value $Replace[$name]
+        $modifications.Add([pscustomobject]@{
+            Name = [string]$name
+            Operation = "Replace"
+            Value = $value
+            TypeKey = Get-ScenarioOperationValueTypeKey -Value $value
+        })
+    }
+    foreach ($name in @($Remove.Keys))
+    {
+        $value = ConvertTo-ScenarioCommandValue -Value $Remove[$name]
+        $modifications.Add([pscustomobject]@{
+            Name = [string]$name
+            Operation = "Remove"
+            Value = $value
+            TypeKey = Get-ScenarioOperationValueTypeKey -Value $value
+        })
+    }
+    foreach ($name in @($Clear))
+    {
+        $modifications.Add([pscustomobject]@{
+            Name = [string]$name
+            Operation = "Clear"
+            Value = $null
+            TypeKey = "Clear"
+        })
+    }
+
+    $batches = [Collections.Generic.List[object]]::new()
+    $groups = @($modifications |
+        Group-Object { "$($_.Operation)|$($_.TypeKey)" } |
+        Sort-Object Name)
+    foreach ($group in $groups)
+    {
+        $groupModifications = @($group.Group | Sort-Object Name)
+        for ($offset = 0; $offset -lt $groupModifications.Count; $offset += $MaximumAttributeCount)
+        {
+            $lastIndex = [math]::Min($offset + $MaximumAttributeCount - 1, $groupModifications.Count - 1)
+            $batchModifications = @($groupModifications[$offset..$lastIndex])
+            $batchNames = @($batchModifications | ForEach-Object { $_.Name })
+            $batchAdd = @{}
+            $batchReplace = @{}
+            $batchRemove = @{}
+            $batchClear = [Collections.Generic.List[string]]::new()
+            $batchGeneratedValues = @{}
+            foreach ($modification in $batchModifications)
+            {
+                switch ($modification.Operation)
+                {
+                    "Add" { $batchAdd[$modification.Name] = $modification.Value }
+                    "Replace" { $batchReplace[$modification.Name] = $modification.Value }
+                    "Remove" { $batchRemove[$modification.Name] = $modification.Value }
+                    "Clear" { $batchClear.Add($modification.Name) }
+                }
+                if ($GeneratedValues.ContainsKey($modification.Name))
+                {
+                    $batchGeneratedValues[$modification.Name] = $GeneratedValues[$modification.Name]
+                }
+            }
+            $batches.Add([pscustomobject]@{
+                AttributeNames = $batchNames
+                Add = $batchAdd
+                Replace = $batchReplace
+                Remove = $batchRemove
+                Clear = $batchClear.ToArray()
+                GeneratedValues = $batchGeneratedValues
+            })
+        }
+    }
+    return $batches.ToArray()
+}
+
 function Invoke-ScenarioLdapRequest
 {
     param(
@@ -6358,105 +7193,201 @@ function Invoke-ScenarioLdapRequest
         [Parameter(Mandatory)] [int] $BatchIndex,
         [Parameter(Mandatory)] [int] $Position,
         [hashtable] $GeneratedValues = @{},
-        [bool] $RangedValueChanged = $false)
+        [bool] $RangedValueChanged = $false,
+        [switch] $AggregateFailure)
 
-    $changed = $Add.Count -gt 0 -or $Replace.Count -gt 0 -or $Remove.Count -gt 0 -or $Clear.Count -gt 0
-    $startedUtc = [datetime]::UtcNow
-    $operationDetails = @{
-        Phase = $Phase
-        Batch = $BatchIndex
-        Position = $Position
-        Action = $Action
-        Attributes = @($GeneratedValues.Keys)
-        CommandSplit = $SplitReason
-    }
-    if (-not $changed)
+    $requestBatches = @(New-ScenarioLdapRequestBatches `
+        -Add $Add `
+        -Replace $Replace `
+        -Remove $Remove `
+        -Clear $Clear `
+        -GeneratedValues $GeneratedValues)
+    if ($requestBatches.Count -eq 0)
     {
+        $startedUtc = [datetime]::UtcNow
+        $operationDetails = @{
+            Phase = $Phase
+            Batch = $BatchIndex
+            Position = $Position
+            Action = $Action
+            Attributes = @()
+            CommandSplit = $SplitReason
+            RequestIndex = 0
+            RequestCount = 0
+        }
         Add-OperationRecord -Operation "ScenarioLDAP" -Status "NoOp" -StartedUtc $startedUtc -Identity $Entity.Identity -Guid $Entity.Guid -Details $operationDetails
         return [ordered]@{
             Changed = $false
+            Failed = $false
             RangedMutation = $false
             RequestCount = 0
             SplitReason = $SplitReason
         }
     }
 
-    $script:Counters.OperationsAttempted++
-    $script:Counters.ScenarioLdapRequests++
-    try
+    $requestCount = 0
+    $succeededRequestCount = 0
+    $failed = $false
+    $effectiveSplitReason = if ($requestBatches.Count -gt 1)
     {
-        if ($WhatIfTraffic)
-        {
-            Set-ScenarioWhatIfValues -Entity $Entity -Add $Add -Replace $Replace -Remove $Remove -Clear $Clear
-        }
-        else
-        {
-            $parameters = @{
-                Identity = if ($Entity.PSObject.Properties.Name -contains "DistinguishedName" -and
-                    -not [string]::IsNullOrWhiteSpace([string]$Entity.DistinguishedName))
-                {
-                    [string]$Entity.DistinguishedName
-                }
-                else
-                {
-                    [Guid]$Entity.Guid
-                }
-                ErrorAction = "Stop"
-            }
-            if ($Add.Count -gt 0) { $parameters.Add = $Add }
-            if ($Replace.Count -gt 0) { $parameters.Replace = $Replace }
-            if ($Remove.Count -gt 0) { $parameters.Remove = $Remove }
-            if ($Clear.Count -gt 0) { $parameters.Clear = @($Clear) }
-            Set-ADObject @parameters
-        }
-        $script:Counters.OperationsSucceeded++
-        $script:Counters.Writes++
-        Add-OperationRecord -Operation "ScenarioLDAP" -Status "Success" -StartedUtc $startedUtc -Identity $Entity.Identity -Guid $Entity.Guid -Details $operationDetails
-        return [ordered]@{
-            Changed = $true
-            RangedMutation = $RangedValueChanged
-            RequestCount = 1
-            SplitReason = $SplitReason
-        }
+        "OperationValueTypeAndAttributeCountLimit=16; $SplitReason"
     }
-    catch
+    else
     {
-        $script:Counters.OperationsFailed++
-        Add-OperationRecord -Operation "ScenarioLDAP" -Status "Failed" -StartedUtc $startedUtc -Identity $Entity.Identity -Guid $Entity.Guid -Details $operationDetails -Exception $_.Exception
-        Stop-LongevityTraffic -Category "ScenarioLdapMutationFailure" -Message "Scenario LDAP $Action failed for $($Entity.Identity): $($_.Exception.Message)" -Exception $_.Exception -Data @{
+        $SplitReason
+    }
+
+    for ($requestIndex = 0; $requestIndex -lt $requestBatches.Count; $requestIndex++)
+    {
+        $requestBatch = $requestBatches[$requestIndex]
+        $requestCount++
+        $startedUtc = [datetime]::UtcNow
+        $operationDetails = @{
             Phase = $Phase
             Batch = $BatchIndex
             Position = $Position
-            Attributes = @($GeneratedValues.Keys)
-            GeneratedValues = $GeneratedValues
-            CommandSplit = $SplitReason
+            Action = $Action
+            Attributes = @($requestBatch.AttributeNames)
+            CommandSplit = $effectiveSplitReason
+            RequestIndex = $requestIndex + 1
+            RequestCount = $requestBatches.Count
         }
-        throw
+        $script:Counters.OperationsAttempted++
+        $script:Counters.ScenarioLdapRequests++
+        try
+        {
+            if ($WhatIfTraffic)
+            {
+                Set-ScenarioWhatIfValues `
+                    -Entity $Entity `
+                    -Add $requestBatch.Add `
+                    -Replace $requestBatch.Replace `
+                    -Remove $requestBatch.Remove `
+                    -Clear $requestBatch.Clear
+            }
+            else
+            {
+                $parameters = @{
+                    Identity = if ($Entity.PSObject.Properties.Name -contains "DistinguishedName" -and
+                        -not [string]::IsNullOrWhiteSpace([string]$Entity.DistinguishedName))
+                    {
+                        [string]$Entity.DistinguishedName
+                    }
+                    else
+                    {
+                        [Guid]$Entity.Guid
+                    }
+                    ErrorAction = "Stop"
+                }
+                if ($requestBatch.Add.Count -gt 0) { $parameters.Add = $requestBatch.Add }
+                if ($requestBatch.Replace.Count -gt 0) { $parameters.Replace = $requestBatch.Replace }
+                if ($requestBatch.Remove.Count -gt 0) { $parameters.Remove = $requestBatch.Remove }
+                if ($requestBatch.Clear.Count -gt 0) { $parameters.Clear = @($requestBatch.Clear) }
+                Set-ADObject @parameters
+            }
+            $script:Counters.OperationsSucceeded++
+            $script:Counters.Writes++
+            $succeededRequestCount++
+            Add-OperationRecord -Operation "ScenarioLDAP" -Status "Success" -StartedUtc $startedUtc -Identity $Entity.Identity -Guid $Entity.Guid -Details $operationDetails
+        }
+        catch
+        {
+            $failed = $true
+            $script:Counters.OperationsFailed++
+            Add-OperationRecord -Operation "ScenarioLDAP" -Status "Failed" -StartedUtc $startedUtc -Identity $Entity.Identity -Guid $Entity.Guid -Details $operationDetails -Exception $_.Exception
+            if ($AggregateFailure)
+            {
+                Add-ScenarioBatchFailure -Category "ScenarioLdapMutationFailure" -Message "Scenario LDAP $Action failed for $($Entity.Identity): $($_.Exception.Message)" -Data @{
+                    Phase = $Phase
+                    Batch = $BatchIndex
+                    Position = $Position
+                    Attributes = @($requestBatch.AttributeNames)
+                    GeneratedValues = $requestBatch.GeneratedValues
+                    CommandSplit = $effectiveSplitReason
+                    RequestIndex = $requestIndex + 1
+                    RequestCount = $requestBatches.Count
+                    Exception = Get-ScenarioExceptionChain -Exception $_.Exception
+                }
+                continue
+            }
+            Stop-LongevityTraffic -Category "ScenarioLdapMutationFailure" -Message "Scenario LDAP $Action failed for $($Entity.Identity): $($_.Exception.Message)" -Exception $_.Exception -Data @{
+                Phase = $Phase
+                Batch = $BatchIndex
+                Position = $Position
+                Attributes = @($requestBatch.AttributeNames)
+                GeneratedValues = $requestBatch.GeneratedValues
+                CommandSplit = $effectiveSplitReason
+                RequestIndex = $requestIndex + 1
+                RequestCount = $requestBatches.Count
+            }
+            throw
+        }
+    }
+
+    return [ordered]@{
+        Changed = $succeededRequestCount -gt 0
+        Failed = $failed
+        RangedMutation = $RangedValueChanged -and $succeededRequestCount -gt 0
+        RequestCount = $requestCount
+        SplitReason = $effectiveSplitReason
     }
 }
 
 function Wait-ScenarioBatchValidations
 {
-    param([Parameter(Mandatory)] [System.Collections.Generic.List[Guid]] $Guids)
+    param(
+        [Parameter(Mandatory)] [System.Collections.Generic.List[Guid]] $Guids,
+        [switch] $AggregateFailures,
+        [switch] $TrackScenarioStage)
 
     $keys = @($Guids | ForEach-Object { $_.ToString() } | Select-Object -Unique)
     if (-not $WhatIfTraffic)
     {
         Start-Sleep -Seconds 15
     }
+    if ($TrackScenarioStage -and $null -ne $script:ScenarioState.CurrentBatch)
+    {
+        $script:ScenarioState.CurrentBatch.Stage = "Comparing"
+        $script:ScenarioState.CurrentBatch.ObjectsToCompare = $keys.Count
+        $script:ScenarioState.CurrentBatch.ObjectsCompared = 0
+        $script:ScenarioState.CurrentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
+        Save-Checkpoint
+    }
     $deadlineUtc = [datetime]::UtcNow.AddSeconds($ValidationTimeoutSeconds)
     while (-not $script:StopRequested -and [datetime]::UtcNow -lt $deadlineUtc)
     {
-        Invoke-DueValidations
+        Invoke-DueValidations -AggregateFailures:$AggregateFailures
         $remaining = @($keys | Where-Object { $script:PendingValidations.ContainsKey($_) })
+        if ($TrackScenarioStage -and $null -ne $script:ScenarioState.CurrentBatch)
+        {
+            $script:ScenarioState.CurrentBatch.ObjectsCompared = $keys.Count - $remaining.Count
+            $script:ScenarioState.CurrentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
+        }
         if ($remaining.Count -eq 0)
         {
+            if ($TrackScenarioStage)
+            {
+                Save-Checkpoint
+            }
             return
         }
         Start-Sleep -Seconds 1
     }
     if (-not $script:StopRequested)
     {
+        if ($AggregateFailures)
+        {
+            foreach ($guid in @($keys | Where-Object { $script:PendingValidations.ContainsKey($_) }))
+            {
+                $item = $script:PendingValidations[$guid]
+                Complete-Validation -Item $item -Status "Failed" -Details @{ Reason = "ScenarioBatchValidationTimeout" }
+                [void]$script:PendingValidations.Remove($guid)
+                Add-ScenarioBatchFailure -Category "ScenarioCompareTimeout" -Message "Scenario batch did not reach DataSame for $($item.Identity)." -Data @{
+                    Validation = $item
+                }
+            }
+            return
+        }
         Stop-LongevityTraffic -Category "ScenarioCompareTimeout" -Message "Scenario batch did not reach DataSame for every mutated GUID." -Data @{
             PendingGuids = @($keys | Where-Object { $script:PendingValidations.ContainsKey($_) })
         }
@@ -6478,6 +7409,132 @@ function Get-ScenarioUnsupportedUpsertAttribute
     return $Name -match "(?i)^(objectCategory|objectClass|objectGUID|objectSid|distinguishedName|name|cn)$"
 }
 
+function Get-ScenarioUnsupportedDeletionAttribute
+{
+    param([Parameter(Mandatory)] [string] $Name)
+
+    return $Name -match "(?i)^(msExchCU|msExchOURoot)$"
+}
+
+function Initialize-ScenarioDeletionBaseline
+{
+    param(
+        [Parameter(Mandatory)] [object] $Entity,
+        [Parameter(Mandatory)] [string] $Phase,
+        [Parameter(Mandatory)] [int] $BatchIndex,
+        [Parameter(Mandatory)] [int] $Position,
+        [Parameter(Mandatory)] [string[]] $SelectedProperties,
+        [Parameter(Mandatory)] [Random] $Random,
+        [Parameter(Mandatory)] [string[]] $RequiredCookies,
+        [switch] $AggregateFailure)
+
+    $metadataByName = @{}
+    foreach ($name in $SelectedProperties)
+    {
+        $metadataByName[$name] = Get-ScenarioAttributeMetadata -Name $name
+    }
+    $current = Get-ScenarioCurrentValues -Entity $Entity -Names $SelectedProperties
+    $objectSid = $null
+    if (-not $WhatIfTraffic)
+    {
+        $adObject = Get-ScenarioAdObject -Entity $Entity
+        $objectSid = $adObject.PSObject.Properties["objectSid"].Value
+    }
+
+    $protectedNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $SelectedProperties)
+    {
+        if (Get-ScenarioProtectedAttribute -Name $name)
+        {
+            [void]$protectedNames.Add($name)
+        }
+    }
+
+    $seedAdd = @{}
+    $seedReplace = @{}
+    $seedValues = @{}
+    foreach ($name in $SelectedProperties)
+    {
+        $metadata = $metadataByName[$name]
+        $existing = @($current[$name])
+        $isSingleValued = Test-ScenarioSingleValuedForEntity -Metadata $metadata -Entity $Entity
+        if ($existing.Count -eq 0 -or (-not $isSingleValued -and $protectedNames.Contains($name)))
+        {
+            $seedCount = if ($isSingleValued -or -not $protectedNames.Contains($name)) { 1 } else { 2 }
+            $seededValues = [Collections.Generic.List[object]]::new()
+            $seededKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($existingValue in $existing)
+            {
+                [void]$seededKeys.Add((ConvertTo-ScenarioValueKey -Value $existingValue))
+            }
+            while ($seededValues.Count -lt $seedCount)
+            {
+                foreach ($candidate in @(New-ScenarioTypedValues -Metadata $metadata -Entity $Entity -Random $Random -ObjectSid $objectSid))
+                {
+                    if ($seededKeys.Add((ConvertTo-ScenarioValueKey -Value $candidate)))
+                    {
+                        $seededValues.Add($candidate)
+                    }
+                    if ($seededValues.Count -ge $seedCount)
+                    {
+                        break
+                    }
+                }
+            }
+            $seedValues[$name] = $seededValues.ToArray()
+            if ($isSingleValued)
+            {
+                $seedReplace[$name] = $seededValues[0]
+            }
+            else
+            {
+                $seedAdd[$name] = $seededValues.ToArray()
+            }
+        }
+    }
+
+    if ($seedAdd.Count -eq 0 -and $seedReplace.Count -eq 0)
+    {
+        return [ordered]@{
+            Seeded = $false
+            Failed = $false
+            RequestCount = 0
+        }
+    }
+
+    $seedResult = Invoke-ScenarioLdapRequest `
+        -Entity $Entity `
+        -Action "BaselineSeed" `
+        -Add $seedAdd `
+        -Replace $seedReplace `
+        -Phase $Phase `
+        -BatchIndex $BatchIndex `
+        -Position $Position `
+        -SplitReason "Deletion baseline seed required before selected value existed." `
+        -GeneratedValues $seedValues `
+        -RangedValueChanged ($seedValues.ContainsKey("msExchMultiMailboxDatabasesLink")) `
+        -AggregateFailure:$AggregateFailure
+    if ($seedResult.Failed)
+    {
+        return [ordered]@{
+            Seeded = $false
+            Failed = $true
+            RequestCount = [int]$seedResult.RequestCount
+        }
+    }
+
+    $script:Counters.ScenarioBaselineSeeds++
+    if ($seedResult.Changed)
+    {
+        Add-ScenarioPendingValidation -Entity $Entity -Reason "ScenarioBaselineSeed:$Phase" -RequiredCookies $RequiredCookies
+    }
+    return [ordered]@{
+        Seeded = [bool]$seedResult.Changed
+        Failed = $false
+        RequestCount = [int]$seedResult.RequestCount
+    }
+}
+
 function Invoke-ScenarioObjectMutation
 {
     param(
@@ -6488,7 +7545,8 @@ function Invoke-ScenarioObjectMutation
         [Parameter(Mandatory)] [ValidateSet("Upsert", "Delete")] [string] $Operation,
         [Parameter(Mandatory)] [string[]] $SelectedProperties,
         [Parameter(Mandatory)] [Random] $Random,
-        [Parameter(Mandatory)] [string[]] $RequiredCookies)
+        [Parameter(Mandatory)] [string[]] $RequiredCookies,
+        [switch] $AggregateFailure)
 
     $selected = [Collections.Generic.List[string]]::new()
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -6521,7 +7579,7 @@ function Invoke-ScenarioObjectMutation
     $objectSid = $null
     if (-not $WhatIfTraffic)
     {
-        $adObject = Get-ScenarioAdObject -Entity $Entity -Properties $selected.ToArray()
+        $adObject = Get-ScenarioAdObject -Entity $Entity
         $objectSid = $adObject.PSObject.Properties["objectSid"].Value
     }
 
@@ -6531,9 +7589,6 @@ function Invoke-ScenarioObjectMutation
     $clear = [Collections.Generic.List[string]]::new()
     $generatedValues = @{}
     $deletionModes = @{}
-    $seedAdd = @{}
-    $seedReplace = @{}
-    $seedValues = @{}
     $rangedValueChanged = $false
 
     if ($Operation -eq "Upsert")
@@ -6544,7 +7599,7 @@ function Invoke-ScenarioObjectMutation
             $values = @(New-ScenarioTypedValues -Metadata $metadata -Entity $Entity -Random $Random -ObjectSid $objectSid)
             $generatedValues[$name] = $values
             $existing = @($current[$name])
-            if (ConvertTo-ScenarioBoolean $metadata.IsSingleValued)
+            if (Test-ScenarioSingleValuedForEntity -Metadata $metadata -Entity $Entity)
             {
                 if ($existing.Count -eq 1 -and (Test-ScenarioValueEqual -Left $existing[0] -Right $values[0]))
                 {
@@ -6584,19 +7639,6 @@ function Invoke-ScenarioObjectMutation
                         $rangedValueChanged = $true
                     }
                 }
-                else
-                {
-                    $preserved = [Collections.Generic.List[object]]::new()
-                    foreach ($oldValue in $existing)
-                    {
-                        $preserved.Add($oldValue)
-                    }
-                    foreach ($value in $values)
-                    {
-                        $preserved.Add($value)
-                    }
-                    $replace[$name] = $preserved.ToArray()
-                }
             }
         }
     }
@@ -6619,74 +7661,12 @@ function Invoke-ScenarioObjectMutation
             {
                 $existing.Add($value)
             }
-            $isSingleValued = ConvertTo-ScenarioBoolean $metadata.IsSingleValued
-            if ($existing.Count -eq 0 -or (-not $isSingleValued -and $protectedNames.Contains($name)))
-            {
-                $seedCount = if ($isSingleValued -or -not $protectedNames.Contains($name)) { 1 } else { 2 }
-                $seededList = [Collections.Generic.List[object]]::new()
-                $seededKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-                while ($seededList.Count -lt $seedCount)
-                {
-                    foreach ($candidate in @(New-ScenarioTypedValues -Metadata $metadata -Entity $Entity -Random $Random -ObjectSid $objectSid))
-                    {
-                        if ($seededKeys.Add((ConvertTo-ScenarioValueKey -Value $candidate)))
-                        {
-                            $seededList.Add($candidate)
-                        }
-                        if ($seededList.Count -ge $seedCount)
-                        {
-                            break
-                        }
-                    }
-                }
-                $seeded = $seededList.ToArray()
-                $seedValues[$name] = $seeded
-                if ($isSingleValued)
-                {
-                    $seedReplace[$name] = $seeded[0]
-                }
-                else
-                {
-                    $seedAdd[$name] = $seeded
-                }
-            }
-        }
-
-        if ($seedAdd.Count -gt 0 -or $seedReplace.Count -gt 0)
-        {
-            $seedResult = Invoke-ScenarioLdapRequest `
-                -Entity $Entity `
-                -Action "BaselineSeed" `
-                -Add $seedAdd `
-                -Replace $seedReplace `
-                -Phase $Phase `
-                -BatchIndex $BatchIndex `
-                -Position $Position `
-                -SplitReason "Deletion baseline seed required before selected value existed." `
-                -GeneratedValues $seedValues `
-                -RangedValueChanged ($seedValues.ContainsKey("msExchMultiMailboxDatabasesLink"))
-            $script:Counters.ScenarioBaselineSeeds++
-            Add-ScenarioPendingValidation -Entity $Entity -Reason "ScenarioBaselineSeed:$Phase" -RequiredCookies $RequiredCookies
-            $baselineGuids = [Collections.Generic.List[Guid]]::new()
-            $baselineGuids.Add([Guid]$Entity.Guid)
-            Wait-ScenarioBatchValidations -Guids $baselineGuids
-            $current = Get-ScenarioCurrentValues -Entity $Entity -Names $selected.ToArray()
-        }
-
-        foreach ($name in $selected)
-        {
-            $metadata = $metadataByName[$name]
-            $existing = [Collections.Generic.List[object]]::new()
-            foreach ($value in @($current[$name]))
-            {
-                $existing.Add($value)
-            }
             if ($existing.Count -eq 0)
             {
-                throw "Attribute '$name' was absent after the required deletion baseline seed."
+                throw "Attribute '$name' was absent after the required deletion batch-preparation stage."
             }
             $generatedValues[$name] = $existing.ToArray()
-            if (ConvertTo-ScenarioBoolean $metadata.IsSingleValued)
+            if (Test-ScenarioSingleValuedForEntity -Metadata $metadata -Entity $Entity)
             {
                 $clear.Add($name)
                 $deletionModes[$name] = "ClearSingleValued"
@@ -6742,6 +7722,30 @@ function Invoke-ScenarioObjectMutation
         }
     }
 
+    $kindProperty = $Entity.PSObject.Properties["Kind"]
+    if ($null -ne $kindProperty -and [string]$kindProperty.Value -eq "Group")
+    {
+        if ($add.ContainsKey("description"))
+        {
+            $descriptionValues = @($add["description"])
+            if ($descriptionValues.Count -eq 0)
+            {
+                throw "Group description upsert produced no value."
+            }
+            [void]$add.Remove("description")
+            $replace["description"] = [string]$descriptionValues[0]
+        }
+        elseif ($replace.ContainsKey("description"))
+        {
+            $descriptionValues = @($replace["description"])
+            if ($descriptionValues.Count -eq 0)
+            {
+                throw "Group description upsert produced no value."
+            }
+            $replace["description"] = [string]$descriptionValues[0]
+        }
+    }
+
     $requestResult = Invoke-ScenarioLdapRequest `
         -Entity $Entity `
         -Action $Operation `
@@ -6753,8 +7757,12 @@ function Invoke-ScenarioObjectMutation
         -BatchIndex $BatchIndex `
         -Position $Position `
         -GeneratedValues $generatedValues `
-        -RangedValueChanged $rangedValueChanged
-    Add-ScenarioPendingValidation -Entity $Entity -Reason "Scenario:${Phase}:$Operation" -RequiredCookies $RequiredCookies
+        -RangedValueChanged $rangedValueChanged `
+        -AggregateFailure:$AggregateFailure
+    if ($requestResult.Changed)
+    {
+        Add-ScenarioPendingValidation -Entity $Entity -Reason "Scenario:${Phase}:$Operation" -RequiredCookies $RequiredCookies
+    }
 
     return [ordered]@{
         Guid = [Guid]$Entity.Guid
@@ -6764,120 +7772,10 @@ function Invoke-ScenarioObjectMutation
         DeletionModes = $deletionModes
         Changed = [bool]$requestResult.Changed
         RangedMutation = [bool]$requestResult.RangedMutation
-        RequestCount = [int]$requestResult.RequestCount + [int]($seedAdd.Count -gt 0 -or $seedReplace.Count -gt 0)
-        BaselineSeeded = $seedAdd.Count -gt 0 -or $seedReplace.Count -gt 0
-        CommandSplit = if ($seedAdd.Count -gt 0 -or $seedReplace.Count -gt 0) { "BaselineSeedThenDelete" } else { "None" }
-    }
-}
-
-function Get-ScenarioRangedTelemetryEvidence
-{
-    param([Parameter(Mandatory)] [datetime] $NotBeforeUtc)
-
-    $evidence = [Collections.Generic.List[object]]::new()
-    $sides = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $logFiles = @(Get-ChildItem "D:\DirectoryLogs\ObjectStoreDirSync\ObjectStoreDirSyncEngineLog" -File -ErrorAction SilentlyContinue |
-        Sort-Object Name -Descending |
-        Select-Object -First 4)
-    $timestampPattern = "^(?<TimestampUtc>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z),"
-    foreach ($logFile in $logFiles)
-    {
-        $stream = $null
-        $reader = $null
-        try
-        {
-            $stream = [IO.FileStream]::new(
-                $logFile.FullName,
-                [IO.FileMode]::Open,
-                [IO.FileAccess]::Read,
-                [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
-            $reader = [IO.StreamReader]::new($stream)
-            while (($line = $reader.ReadLine()) -ne $null)
-            {
-                if (-not $line.Contains("Found RecipientChange.MaterialRangedAttr.") -or
-                    $line -notmatch $timestampPattern)
-                {
-                    continue
-                }
-                $timestampUtc = [datetime]::MinValue
-                if (-not [datetime]::TryParse(
-                    $Matches.TimestampUtc,
-                    [Globalization.CultureInfo]::InvariantCulture,
-                    [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal,
-                    [ref]$timestampUtc) -or $timestampUtc -lt $NotBeforeUtc)
-                {
-                    continue
-                }
-                $sideMatch = [regex]::Match($line, "(?i)\bSide\s*[:=]\s*([AB])\b")
-                $side = if ($sideMatch.Success) { $sideMatch.Groups[1].Value.ToUpperInvariant() } else { $null }
-                if ($null -ne $side)
-                {
-                    [void]$sides.Add($side)
-                }
-                $evidence.Add([ordered]@{
-                    File = $logFile.Name
-                    TimestampUtc = $timestampUtc.ToString("o")
-                    Side = $side
-                })
-            }
-        }
-        catch [IO.IOException]
-        {
-            continue
-        }
-        finally
-        {
-            if ($reader)
-            {
-                $reader.Dispose()
-            }
-            elseif ($stream)
-            {
-                $stream.Dispose()
-            }
-        }
-    }
-    return [ordered]@{
-        Evidence = $evidence.ToArray()
-        Sides = @($sides)
-        SideDistinguished = $sides.Count -gt 0
-    }
-}
-
-function Wait-ScenarioRangedTelemetry
-{
-    param([Parameter(Mandatory)] [datetime] $NotBeforeUtc)
-
-    if ($WhatIfTraffic)
-    {
-        return [ordered]@{ Passed = $true; Evidence = @(); Sides = @("A", "B"); SideDistinguished = $true }
-    }
-
-    $deadlineUtc = [datetime]::UtcNow.AddSeconds(30)
-    do
-    {
-        $evidence = Get-ScenarioRangedTelemetryEvidence -NotBeforeUtc $NotBeforeUtc
-        if ($evidence.SideDistinguished)
-        {
-            if (@($evidence.Sides | Where-Object { $_ -eq "A" }).Count -gt 0 -and
-                @($evidence.Sides | Where-Object { $_ -eq "B" }).Count -gt 0)
-            {
-                return [ordered]@{ Passed = $true; Evidence = $evidence.Evidence; Sides = $evidence.Sides; SideDistinguished = $true }
-            }
-        }
-        elseif (Test-MaterialRangedAttributeTelemetryAfter -NotBeforeUtc $NotBeforeUtc)
-        {
-            return [ordered]@{ Passed = $true; Evidence = $evidence.Evidence; Sides = @(); SideDistinguished = $false }
-        }
-        Start-Sleep -Seconds 2
-    }
-    while ([datetime]::UtcNow -lt $deadlineUtc)
-
-    return [ordered]@{
-        Passed = $false
-        Evidence = @($evidence.Evidence)
-        Sides = @($evidence.Sides)
-        SideDistinguished = [bool]$evidence.SideDistinguished
+        RequestCount = [int]$requestResult.RequestCount
+        BaselineSeeded = $false
+        CommandSplit = "None"
+        Failed = [bool]$requestResult.Failed
     }
 }
 
@@ -6890,20 +7788,32 @@ function Invoke-ScenarioBatch
 
     $isInitial = $BatchIndex -eq 0
     $repetition = if ($isInitial) { 0 } else { $BatchIndex }
+    if ($isInitial)
+    {
+        $script:ScenarioBatchFailures.Clear()
+    }
     $entities = if ([string]$PhaseDefinition.EntityKind -eq "User")
     {
-        @($script:Contacts.Values)
+        @($script:Contacts.Values | Sort-Object { ([Guid]$_.Guid).ToString("D") })
     }
     else
     {
-        @($script:Groups.Values)
+        @($script:Groups.Values | Sort-Object { ([Guid]$_.Guid).ToString("D") })
     }
     $random = New-ScenarioRandom -PhaseIndex $PhaseIndex -BatchIndex $BatchIndex
     $objectOrder = Get-ShuffledScenarioArray -Items $entities -Random $random
-    $recipientOrder = @(
-        if (@($PhaseDefinition.RecipientProperties).Count -gt 0)
+    $recipientProperties = @($PhaseDefinition.RecipientProperties)
+    if ([string]$PhaseDefinition.Operation -eq "Delete")
     {
-        Get-ShuffledScenarioArray -Items @($PhaseDefinition.RecipientProperties) -Random $random
+        $recipientProperties = @(
+            $recipientProperties |
+                Where-Object { -not (Get-ScenarioUnsupportedDeletionAttribute -Name ([string]$_)) }
+        )
+    }
+    $recipientOrder = @(
+        if ($recipientProperties.Count -gt 0)
+    {
+        Get-ShuffledScenarioArray -Items $recipientProperties -Random $random
     }
     else
     {
@@ -6931,7 +7841,28 @@ function Invoke-ScenarioBatch
             PhaseIndex = $PhaseIndex
             BatchIndex = $BatchIndex
             Phase = [string]$PhaseDefinition.Name
+            Stage = "Mutating"
+            ObjectCount = $objectOrder.Count
+            ObjectsAttempted = 0
+            ObjectsSucceeded = 0
+            ObjectsFailed = 0
+            ObjectsToCompare = 0
+            ObjectsCompared = 0
+            LastPosition = 0
+            LastObjectGuid = $null
+            LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
             StartedUtc = [datetime]::UtcNow.ToString("o")
+            BaselinePreparationCompleted = ([string]$PhaseDefinition.Operation -ne "Delete")
+            BaselinePreparedGuids = @()
+            BaselineSeededGuids = @()
+            BaselineObjectsPrepared = 0
+            BaselineObjectsSeeded = 0
+            BaselineObjectsCompared = 0
+            BaselinePreparationLdapRequests = 0L
+            BaselinePreparationSeedCount = 0L
+            MaterializedPlan = @()
+            MaterializedPlanPath = $null
+            MaterializedPlanCount = 0
         }
         $script:ScenarioState.CurrentBatchCompletedGuids = @()
         Save-Checkpoint
@@ -6941,9 +7872,183 @@ function Invoke-ScenarioBatch
     {
         [void]$completed.Add([string]$guid)
     }
+    foreach ($property in @{
+        Stage = "Mutating"
+        ObjectCount = $objectOrder.Count
+        ObjectsAttempted = $completed.Count
+        ObjectsSucceeded = $completed.Count
+        ObjectsFailed = 0
+        ObjectsToCompare = 0
+        ObjectsCompared = 0
+        LastPosition = 0
+        LastObjectGuid = $null
+        LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
+        BaselinePreparationCompleted = ([string]$PhaseDefinition.Operation -ne "Delete")
+        BaselinePreparedGuids = @()
+        BaselineSeededGuids = @()
+        BaselineObjectsPrepared = 0
+        BaselineObjectsSeeded = 0
+        BaselineObjectsCompared = 0
+        BaselinePreparationLdapRequests = 0L
+        BaselinePreparationSeedCount = 0L
+        MaterializedPlan = @()
+        MaterializedPlanPath = $null
+        MaterializedPlanCount = 0
+    }.GetEnumerator())
+    {
+        if ($script:ScenarioState.CurrentBatch -is [System.Collections.IDictionary])
+        {
+            if (-not $script:ScenarioState.CurrentBatch.Contains($property.Key))
+            {
+                $script:ScenarioState.CurrentBatch[$property.Key] = $property.Value
+            }
+        }
+        elseif (-not ($script:ScenarioState.CurrentBatch.PSObject.Properties.Name -contains $property.Key))
+        {
+            Add-Member -InputObject $script:ScenarioState.CurrentBatch `
+                -MemberType NoteProperty `
+                -Name $property.Key `
+                -Value $property.Value
+        }
+    }
+    $script:ScenarioState.CurrentBatch.Stage = "Mutating"
+    $script:ScenarioState.CurrentBatch.ObjectCount = $objectOrder.Count
+    $script:ScenarioState.CurrentBatch.ObjectsAttempted = $completed.Count
+    $script:ScenarioState.CurrentBatch.ObjectsSucceeded = $completed.Count
+    $script:ScenarioState.CurrentBatch.ObjectsFailed = 0
+    $script:ScenarioState.CurrentBatch.ObjectsToCompare = 0
+    $script:ScenarioState.CurrentBatch.ObjectsCompared = 0
+    $script:ScenarioState.CurrentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
+
+    $currentBatch = $script:ScenarioState.CurrentBatch
+    $batchPlans = [Collections.Generic.List[object]]::new()
+    $persistedPlans = @()
+    if (@($currentBatch.MaterializedPlan).Count -gt 0)
+    {
+        $persistedPlans = @($currentBatch.MaterializedPlan)
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace([string]$currentBatch.MaterializedPlanPath))
+    {
+        $planPath = Join-Path $script:RunDirectory ([string]$currentBatch.MaterializedPlanPath)
+        if (-not (Test-Path -LiteralPath $planPath))
+        {
+            throw "Scenario materialized plan file is missing: $planPath"
+        }
+        $loadedPlans = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json
+        $persistedPlans = @($loadedPlans)
+    }
+    if ($persistedPlans.Count -gt 0)
+    {
+        $entitiesByGuid = @{}
+        foreach ($entity in $entities)
+        {
+            $entitiesByGuid[([Guid]$entity.Guid).ToString()] = $entity
+        }
+        foreach ($persistedPlan in @($persistedPlans | Sort-Object Position))
+        {
+            $guidKey = ([Guid]$persistedPlan.Guid).ToString()
+            if (-not $entitiesByGuid.ContainsKey($guidKey))
+            {
+                throw "Scenario materialized plan references missing entity '$guidKey'."
+            }
+            $batchPlans.Add([ordered]@{
+                Position = [int]$persistedPlan.Position
+                Entity = $entitiesByGuid[$guidKey]
+                SelectedProperties = @($persistedPlan.SelectedProperties)
+                RequiredCookies = @($persistedPlan.RequiredCookies)
+            })
+        }
+    }
+    else
+    {
+        for ($position = 1; $position -le $objectOrder.Count; $position++)
+        {
+            $entity = $objectOrder[$position - 1]
+            if ($isInitial)
+            {
+                $recipientSelection = Get-ScenarioInitialSelection -PropertyOrder $recipientOrder -Position $position
+                $linkSelection = Get-ScenarioInitialSelection -PropertyOrder $linkOrder -Position $position
+            }
+            else
+            {
+                $selectionRandom = New-ScenarioRandom -PhaseIndex $PhaseIndex -BatchIndex $BatchIndex -Salt $position
+                $recipientWidth = if ($recipientOrder.Count -gt 0) { 1 + ($position % $recipientOrder.Count) } else { 0 }
+                $linkWidth = if ($linkOrder.Count -gt 0) { 1 + ($position % $linkOrder.Count) } else { 0 }
+                $recipientSelection = Select-ScenarioProperties -Properties $recipientProperties -Width $recipientWidth -Random $selectionRandom
+                $linkSelection = Select-ScenarioProperties -Properties @($PhaseDefinition.LinkProperties) -Width $linkWidth -Random $selectionRandom
+            }
+
+            $selection = if ($recipientOrder.Count -gt 0 -and $linkOrder.Count -gt 0)
+            {
+                Merge-ScenarioMixedSelections `
+                    -RecipientSelection @($recipientSelection) `
+                    -LinkSelection @($linkSelection) `
+                    -FullRecipientOrder $recipientOrder `
+                    -FullLinkOrder $linkOrder `
+                    -RequireDistinct $true
+            }
+            else
+            {
+                [ordered]@{
+                    Recipient = @($recipientSelection)
+                    Link = @($linkSelection)
+                }
+            }
+            $requiredCookies =
+                if ($selection.Link.Count -gt 0 -and $selection.Recipient.Count -gt 0)
+                {
+                    @("Recipients", "Links")
+                }
+                elseif ($selection.Link.Count -gt 0)
+                {
+                    @("Links")
+                }
+                else
+                {
+                    @("Recipients")
+                }
+            $batchPlans.Add([ordered]@{
+                Position = $position
+                Entity = $entity
+                SelectedProperties = @($selection.Recipient) + @($selection.Link)
+                RequiredCookies = $requiredCookies
+            })
+        }
+        $persistedPlans = @(
+            foreach ($plan in $batchPlans)
+            {
+                [ordered]@{
+                    Position = [int]$plan.Position
+                    Guid = ([Guid]$plan.Entity.Guid).ToString()
+                    SelectedProperties = @($plan.SelectedProperties)
+                    RequiredCookies = @($plan.RequiredCookies)
+                }
+            }
+        )
+        $planFileName = "scenario-plan-p{0:D2}-b{1:D2}.json" -f $PhaseIndex, $BatchIndex
+        $planPath = Join-Path $script:RunDirectory $planFileName
+        Write-AtomicJsonSnapshot -Path $planPath -InputObject $persistedPlans -Depth 5
+        $currentBatch.MaterializedPlan = @()
+        $currentBatch.MaterializedPlanPath = $planFileName
+        $currentBatch.MaterializedPlanCount = $persistedPlans.Count
+        Save-Checkpoint
+    }
+    if (@($currentBatch.MaterializedPlan).Count -gt 0)
+    {
+        $planFileName = "scenario-plan-p{0:D2}-b{1:D2}.json" -f $PhaseIndex, $BatchIndex
+        $planPath = Join-Path $script:RunDirectory $planFileName
+        Write-AtomicJsonSnapshot -Path $planPath -InputObject $persistedPlans -Depth 5
+        $currentBatch.MaterializedPlan = @()
+        $currentBatch.MaterializedPlanPath = $planFileName
+        $currentBatch.MaterializedPlanCount = $persistedPlans.Count
+        Save-Checkpoint
+    }
+    if ([int]$currentBatch.MaterializedPlanCount -ne $batchPlans.Count)
+    {
+        throw "Scenario materialized plan count $($currentBatch.MaterializedPlanCount) does not match object plan count $($batchPlans.Count)."
+    }
 
     $startedUtc = [datetime]::UtcNow
-    $rangedTelemetryStartUtc = $startedUtc
     $batchGuids = [Collections.Generic.List[Guid]]::new()
     $batchStats = [ordered]@{
         Phase = [string]$PhaseDefinition.Name
@@ -6953,12 +8058,12 @@ function Invoke-ScenarioBatch
         InitialCoverageBatch = $isInitial
         Operation = [string]$PhaseDefinition.Operation
         EntityKind = [string]$PhaseDefinition.EntityKind
-        ObjectCount = $objectOrder.Count
-        ObjectsCompleted = 0
+        ObjectCount = $batchPlans.Count
+        ObjectsCompleted = $completed.Count
         SelectedAttributeSlots = 0L
-        LdapRequests = 0L
-        ObjectLevelLdapRequests = 0L
-        BaselineSeeds = 0L
+        LdapRequests = [long]$currentBatch.BaselinePreparationLdapRequests
+        ObjectLevelLdapRequests = $completed.Count
+        BaselineSeeds = [long]$currentBatch.BaselinePreparationSeedCount
         RangedMutations = 0
         StartedUtc = $startedUtc.ToString("o")
         Status = "Running"
@@ -6968,52 +8073,161 @@ function Invoke-ScenarioBatch
         Batch = $BatchIndex
         Repetition = $repetition
         InitialCoverageBatch = $isInitial
-        ObjectCount = $objectOrder.Count
+        ObjectCount = $batchPlans.Count
         RandomSeed = $RandomSeed
     }
 
-    for ($position = 1; $position -le $objectOrder.Count -and -not $script:StopRequested; $position++)
+    if ([string]$PhaseDefinition.Operation -eq "Delete" -and
+        -not [bool]$currentBatch.BaselinePreparationCompleted)
     {
-        $entity = $objectOrder[$position - 1]
+        $currentBatch.Stage = "PreparingDeletionBaseline"
+        Write-RunEvent -Level "Information" -Message "Scenario deletion baseline preparation started." -Data @{
+            Phase = [string]$PhaseDefinition.Name
+            PhaseIndex = $PhaseIndex
+            Batch = $BatchIndex
+            ObjectCount = $batchPlans.Count
+        }
+        $prepared = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($guid in @($currentBatch.BaselinePreparedGuids))
+        {
+            [void]$prepared.Add([string]$guid)
+        }
+        foreach ($guid in @($completed))
+        {
+            [void]$prepared.Add([string]$guid)
+        }
+        $seeded = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($guid in @($currentBatch.BaselineSeededGuids))
+        {
+            [void]$seeded.Add([string]$guid)
+        }
+        foreach ($plan in $batchPlans)
+        {
+            if ($script:StopRequested)
+            {
+                break
+            }
+            $entity = $plan.Entity
+            $position = [int]$plan.Position
+            $guidKey = ([Guid]$entity.Guid).ToString()
+            if ($completed.Contains($guidKey) -or $prepared.Contains($guidKey))
+            {
+                continue
+            }
+            $baselineRandom = New-ScenarioRandom -PhaseIndex $PhaseIndex -BatchIndex $BatchIndex -Salt (($position * 13) + 1)
+            try
+            {
+                $baseline = Initialize-ScenarioDeletionBaseline `
+                    -Entity $entity `
+                    -Phase ([string]$PhaseDefinition.Name) `
+                    -BatchIndex $BatchIndex `
+                    -Position $position `
+                    -SelectedProperties @($plan.SelectedProperties) `
+                    -Random $baselineRandom `
+                    -RequiredCookies @($plan.RequiredCookies) `
+                    -AggregateFailure:$isInitial
+            }
+            catch
+            {
+                Save-Checkpoint
+                throw
+            }
+            if (-not $baseline.Failed)
+            {
+                [void]$prepared.Add($guidKey)
+                if ($baseline.Seeded)
+                {
+                    [void]$seeded.Add($guidKey)
+                    $currentBatch.BaselinePreparationSeedCount++
+                }
+                $currentBatch.BaselinePreparationLdapRequests += [int]$baseline.RequestCount
+            }
+            $currentBatch.BaselinePreparedGuids = @($prepared)
+            $currentBatch.BaselineSeededGuids = @($seeded)
+            $currentBatch.BaselineObjectsPrepared = $prepared.Count
+            $currentBatch.BaselineObjectsSeeded = $seeded.Count
+            $currentBatch.LastPosition = $position
+            $currentBatch.LastObjectGuid = $guidKey
+            $currentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
+            if ($baseline.Failed -or
+                ($prepared.Count % 10) -eq 0 -or
+                ([datetime]::UtcNow - $script:LastCheckpointUtc).TotalSeconds -ge 5)
+            {
+                Save-Checkpoint
+            }
+        }
+        if ($script:StopRequested)
+        {
+            return
+        }
+        $pendingBaselineGuids = [Collections.Generic.List[Guid]]::new()
+        foreach ($guid in @($seeded))
+        {
+            if ($script:PendingValidations.ContainsKey($guid))
+            {
+                $pendingBaselineGuids.Add([Guid]$guid)
+            }
+        }
+        if ($pendingBaselineGuids.Count -gt 0)
+        {
+            Wait-ScenarioBatchValidations -Guids $pendingBaselineGuids -AggregateFailures:$isInitial
+        }
+        $currentBatch.BaselineObjectsCompared = $seeded.Count
+        if ($isInitial -and $script:ScenarioBatchFailures.Count -gt 0)
+        {
+            Stop-LongevityTraffic -Category "ScenarioDeletionBaselinePreparationFailures" -Message "Scenario deletion baseline preparation found $($script:ScenarioBatchFailures.Count) failures." -Data @{
+                Phase = [string]$PhaseDefinition.Name
+                Batch = $BatchIndex
+                PreparedObjects = $prepared.Count
+                SeededObjects = $seeded.Count
+                Failures = $script:ScenarioBatchFailures.ToArray()
+            }
+            return
+        }
+        if ($prepared.Count -ne $batchPlans.Count)
+        {
+            throw "Scenario deletion baseline preparation completed only $($prepared.Count) of $($batchPlans.Count) objects."
+        }
+        $currentBatch.BaselinePreparationCompleted = $true
+        $currentBatch.Stage = "Mutating"
+        $currentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
+        Save-Checkpoint
+        $batchStats.LdapRequests = [long]$currentBatch.BaselinePreparationLdapRequests
+        $batchStats.BaselineSeeds = [long]$currentBatch.BaselinePreparationSeedCount
+        Write-RunEvent -Level "Success" -Message "Scenario deletion baseline preparation passed." -Data @{
+            Phase = [string]$PhaseDefinition.Name
+            PhaseIndex = $PhaseIndex
+            Batch = $BatchIndex
+            PreparedObjects = $prepared.Count
+            SeededObjects = $seeded.Count
+            LdapRequests = [long]$currentBatch.BaselinePreparationLdapRequests
+        }
+    }
+
+    $currentBatch.Stage = "Mutating"
+    $currentBatch.ObjectsAttempted = $completed.Count
+    $currentBatch.ObjectsSucceeded = $completed.Count
+    $currentBatch.ObjectsFailed = 0
+    $currentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
+
+    foreach ($plan in $batchPlans)
+    {
+        if ($script:StopRequested)
+        {
+            break
+        }
+        $entity = $plan.Entity
+        $position = [int]$plan.Position
         $guidKey = ([Guid]$entity.Guid).ToString()
         if ($completed.Contains($guidKey))
         {
             $batchGuids.Add([Guid]$entity.Guid)
             continue
         }
-
-        if ($isInitial)
-        {
-            $recipientSelection = Get-ScenarioInitialSelection -PropertyOrder $recipientOrder -Position $position
-            $linkSelection = Get-ScenarioInitialSelection -PropertyOrder $linkOrder -Position $position
-        }
-        else
-        {
-            $objectRandom = New-ScenarioRandom -PhaseIndex $PhaseIndex -BatchIndex $BatchIndex -Salt $position
-            $recipientWidth = if ($recipientOrder.Count -gt 0) { 1 + ($position % $recipientOrder.Count) } else { 0 }
-            $linkWidth = if ($linkOrder.Count -gt 0) { 1 + ($position % $linkOrder.Count) } else { 0 }
-            $recipientSelection = Select-ScenarioProperties -Properties @($PhaseDefinition.RecipientProperties) -Width $recipientWidth -Random $objectRandom
-            $linkSelection = Select-ScenarioProperties -Properties @($PhaseDefinition.LinkProperties) -Width $linkWidth -Random $objectRandom
-        }
-
-        $selection = if ($recipientOrder.Count -gt 0 -and $linkOrder.Count -gt 0)
-        {
-            Merge-ScenarioMixedSelections `
-                -RecipientSelection @($recipientSelection) `
-                -LinkSelection @($linkSelection) `
-                -FullRecipientOrder $recipientOrder `
-                -FullLinkOrder $linkOrder `
-                -RequireDistinct $true
-        }
-        else
-        {
-            [ordered]@{
-                Recipient = @($recipientSelection)
-                Link = @($linkSelection)
-            }
-        }
-        $selectedProperties = @($selection.Recipient) + @($selection.Link)
-        $objectRandom = New-ScenarioRandom -PhaseIndex $PhaseIndex -BatchIndex $BatchIndex -Salt ($position * 13)
+        $objectRandom = New-ScenarioRandom `
+            -PhaseIndex $PhaseIndex `
+            -BatchIndex $BatchIndex `
+            -Salt $(if ([string]$PhaseDefinition.Operation -eq "Delete") { ($position * 13) + 2 } else { $position * 13 })
         try
         {
             $result = Invoke-ScenarioObjectMutation `
@@ -7022,18 +8236,51 @@ function Invoke-ScenarioBatch
                 -BatchIndex $BatchIndex `
                 -Position $position `
                 -Operation ([string]$PhaseDefinition.Operation) `
-                -SelectedProperties $selectedProperties `
+                -SelectedProperties @($plan.SelectedProperties) `
                 -Random $objectRandom `
-                -RequiredCookies $(if ($selection.Link.Count -gt 0 -and $selection.Recipient.Count -gt 0) { @("Recipients", "Links") } elseif ($selection.Link.Count -gt 0) { @("Links") } else { @("Recipients") })
+                -RequiredCookies @($plan.RequiredCookies) `
+                -AggregateFailure:$isInitial
         }
         catch
         {
+            $currentBatch.ObjectsAttempted++
+            $currentBatch.ObjectsFailed++
+            $currentBatch.LastPosition = $position
+            $currentBatch.LastObjectGuid = $guidKey
+            $currentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
+            if ($isInitial)
+            {
+                Add-ScenarioBatchFailure -Category "ScenarioHarnessFailure" -Message "Scenario mutation planning failed for $($entity.Identity): $($_.Exception.Message)" -Data @{
+                    Phase = [string]$PhaseDefinition.Name
+                    Batch = $BatchIndex
+                    Position = $position
+                    SelectedProperties = @($plan.SelectedProperties)
+                    Exception = Get-ScenarioExceptionChain -Exception $_.Exception
+                }
+                continue
+            }
+            Save-Checkpoint
             throw
         }
 
-        $batchGuids.Add([Guid]$entity.Guid)
-        [void]$completed.Add($guidKey)
-        $script:ScenarioState.CurrentBatchCompletedGuids = @($completed)
+        if (-not $result.Failed)
+        {
+            $batchGuids.Add([Guid]$entity.Guid)
+        }
+        $currentBatch.ObjectsAttempted++
+        if ($result.Failed)
+        {
+            $currentBatch.ObjectsFailed++
+        }
+        else
+        {
+            $currentBatch.ObjectsSucceeded++
+            [void]$completed.Add($guidKey)
+            $script:ScenarioState.CurrentBatchCompletedGuids = @($completed)
+        }
+        $currentBatch.LastPosition = $position
+        $currentBatch.LastObjectGuid = $guidKey
+        $currentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
         $batchStats.ObjectsCompleted++
         $batchStats.SelectedAttributeSlots += $result.SelectedAttributes.Count
         $batchStats.LdapRequests += $result.RequestCount
@@ -7068,10 +8315,18 @@ function Invoke-ScenarioBatch
             GeneratedValues = $result.GeneratedValues
             DeletionModes = $result.DeletionModes
             LdapAction = [string]$PhaseDefinition.Operation
-            CommandSplit = $result.CommandSplit
+            CommandSplit =
+                if (@($currentBatch.BaselineSeededGuids) -contains $guidKey)
+                {
+                    "BatchPreparationThenDelete"
+                }
+                else
+                {
+                    $result.CommandSplit
+                }
             Changed = $result.Changed
             LdapRequests = $result.RequestCount
-            BaselineSeeded = $result.BaselineSeeded
+            BaselineSeeded = @($currentBatch.BaselineSeededGuids) -contains $guidKey
             ElapsedMilliseconds = [math]::Round($elapsedMilliseconds, 2)
             EstimatedRemainingSeconds = $remainingSeconds
         })
@@ -7087,32 +8342,31 @@ function Invoke-ScenarioBatch
         return
     }
 
-    Wait-ScenarioBatchValidations -Guids $batchGuids
+    $script:ScenarioState.CurrentBatch.Stage = "WaitingForSync"
+    $script:ScenarioState.CurrentBatch.ObjectsToCompare = $batchGuids.Count
+    $script:ScenarioState.CurrentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
+    Save-Checkpoint
+    Wait-ScenarioBatchValidations -Guids $batchGuids -AggregateFailures:$isInitial -TrackScenarioStage
     if ($script:StopRequested)
     {
         return
     }
-    $telemetry = $null
-    if ($batchStats.RangedMutations -gt 0)
+    if ($isInitial -and $script:ScenarioBatchFailures.Count -gt 0)
     {
-        $telemetry = Wait-ScenarioRangedTelemetry -NotBeforeUtc $rangedTelemetryStartUtc
-        if (-not $telemetry.Passed)
-        {
-            Stop-LongevityTraffic -Category "RangedAttributeProtectionNotObserved" -Message "Scenario ranged-link mutations lacked required telemetry." -Data @{
-                Phase = [string]$PhaseDefinition.Name
-                Batch = $BatchIndex
-                Evidence = $telemetry.Evidence
-                Sides = $telemetry.Sides
-            }
-            throw "Scenario ranged-link telemetry validation failed."
+        Stop-LongevityTraffic -Category "ScenarioInitialBatchFailures" -Message "Scenario initial batch found $($script:ScenarioBatchFailures.Count) failures after checking every object." -Data @{
+            Phase = [string]$PhaseDefinition.Name
+            Batch = $BatchIndex
+            Failures = $script:ScenarioBatchFailures.ToArray()
         }
+        return
     }
-
     $finishedUtc = [datetime]::UtcNow
     $batchStats.FinishedUtc = $finishedUtc.ToString("o")
     $batchStats.ElapsedSeconds = [math]::Round(($finishedUtc - $startedUtc).TotalSeconds, 2)
     $batchStats.Status = "Passed"
-    $batchStats.RangedTelemetry = $telemetry
+    $script:ScenarioState.CurrentBatch.Stage = "Completed"
+    $script:ScenarioState.CurrentBatch.ObjectsCompared = $batchGuids.Count
+    $script:ScenarioState.CurrentBatch.LastUpdatedUtc = [datetime]::UtcNow.ToString("o")
     $script:ScenarioBatchSummaries.Add($batchStats)
     $script:Counters.ScenarioBatchesCompleted++
     $script:ScenarioState.CurrentBatch = $null
@@ -7138,7 +8392,7 @@ function Invoke-ScenarioWorkload
         $bootstrapGuids = [Collections.Generic.List[Guid]]::new()
         foreach ($item in @($script:PendingValidations.Values))
         {
-            $bootstrapGuids.Add([Guid]$item.Guid)
+            $bootstrapGuids.Add((ConvertTo-ScenarioGuid -Value $item.Guid -Context "pending validation"))
         }
         Wait-CoverageValidations -Guids $bootstrapGuids.ToArray()
     }
@@ -7209,7 +8463,7 @@ function ConvertTo-ScenarioValueArray
     }
     if ($Value -is [byte[]])
     {
-        return @([byte[]]$Value)
+        return ,([byte[]]$Value)
     }
     if ($Value -is [Collections.IEnumerable] -and -not ($Value -is [string]))
     {
@@ -7362,7 +8616,9 @@ function Initialize-ScenarioPreflight
     Test-ScenarioSyntheticSchemaMetadata
     Test-ScenarioSyntheticValueBounds
     Test-ScenarioSyntheticSidValue
+    Test-ScenarioSyntheticCommandValueShapes
     Initialize-ScenarioTargetPools
+    Test-ScenarioSemanticTargets
     Test-ScenarioDnPreflight
     Test-ScenarioCompareRuntimePreflight
 
@@ -7467,6 +8723,18 @@ function Initialize-ScenarioPreflight
                 {
                     throw "generated string exceeds schema rangeUpper $($metadata.RangeUpper)."
                 }
+                if ($kind -in @("Integer", "LargeInteger") -and
+                    [int64]$metadata.RangeLower -ne 0 -and
+                    [int64]$value -lt [int64]$metadata.RangeLower)
+                {
+                    throw "generated integer $value is below schema rangeLower $($metadata.RangeLower)."
+                }
+                if ($kind -in @("Integer", "LargeInteger") -and
+                    [int64]$metadata.RangeUpper -ne 0 -and
+                    [int64]$value -gt [int64]$metadata.RangeUpper)
+                {
+                    throw "generated integer $value exceeds schema rangeUpper $($metadata.RangeUpper)."
+                }
             }
         }
         catch
@@ -7481,6 +8749,31 @@ function Initialize-ScenarioPreflight
         throw "ScenarioTest preflight failed; no scenario traffic was started:`n - $($uniqueBlockers -join "`n - ")"
     }
 
+    $qualificationPath = Join-Path $script:RunDirectory "qualification.json"
+    $reuseQualification = $false
+    if (-not [string]::IsNullOrWhiteSpace($ResumeRunDirectory) -and
+        (Test-Path -LiteralPath $qualificationPath))
+    {
+        $qualification = Get-Content -LiteralPath $qualificationPath -Raw | ConvertFrom-Json
+        $reuseQualification =
+            [int]$qualification.PlanVersion -eq $script:ScenarioPlanVersion -and
+            [int]$qualification.BatchesPerPhase -eq $script:ScenarioBatchesPerPhase -and
+            [int]$qualification.FailureCount -eq 0
+    }
+    if ($reuseQualification)
+    {
+        Write-RunEvent -Level "Information" -Message "Reusing the prior zero-defect deterministic qualification for resume." -Data @{
+            QualificationPath = $qualificationPath
+            PlanVersion = $script:ScenarioPlanVersion
+            BatchesPerPhase = $script:ScenarioBatchesPerPhase
+        }
+    }
+    else
+    {
+        Test-ScenarioDeterministicPlanQualification
+    }
+
+    Save-ScenarioTargetContext
     Write-RunEvent -Level "Success" -Message "ScenarioTest preflight passed." -Data @{
         AttributeCount = $allNames.Count
         UserObjects = $script:ScenarioCounts.N_User
@@ -7497,7 +8790,26 @@ try
     Initialize-ExchangeEnvironment
     if ($WorkloadMode -eq "ScenarioTest")
     {
-        Initialize-ScenarioPreflight
+        if (-not [string]::IsNullOrWhiteSpace($ResumeRunDirectory) -and
+            -not $ForceFullPreflightOnResume)
+        {
+            if (-not (Restore-ScenarioTargetContext))
+            {
+                Initialize-ScenarioTargetPools
+                Initialize-ScenarioCertificate
+                Save-ScenarioTargetContext
+            }
+            Write-RunEvent -Level "Information" -Message "Skipped full ScenarioTest preflight and deterministic qualification for resume." -Data @{
+                ResumeRunDirectory = $script:RunDirectory
+                CurrentPhaseIndex = $script:ScenarioState.NextPhaseIndex
+                CurrentBatchIndex = $script:ScenarioState.NextBatchIndex
+                CurrentObjectPosition = @($script:ScenarioState.CurrentBatchCompletedGuids).Count
+            }
+        }
+        else
+        {
+            Initialize-ScenarioPreflight
+        }
     }
     if ($PreflightOnly)
     {

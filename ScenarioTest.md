@@ -12,6 +12,13 @@ this scenario.
 - `Group` means the distribution-group objects already created by the harness.
 - Identify objects by GUID during mutation and validation so mutable naming or
   address attributes do not break later operations.
+- Create the User and Group populations once per run. Reuse the same
+  ledger-owned objects in every applicable phase; never create a new population
+  merely because a phase or repetition changed.
+- An object may enter a later phase only after its earlier mutations explicitly
+  reached `DataSame`. Because any terminal failure pauses before the next phase,
+  a recipient or group with an unresolved failure is never reused in later
+  traffic.
 
 ## Embedded Property Arrays
 
@@ -57,36 +64,53 @@ With the current arrays, create 235 mail contacts and 267 groups.
    targets required by a property-specific generator.
 7. Never mutate mandatory identity attributes in a way that makes the test
    object undiscoverable. Use GUID-based lookup throughout.
-8. Treat an LDAP mutation failure, invalid generated value, sync failure,
-   compare timeout, or non-`DataSame` result as a test failure. Stop immediately
-   and report the object, phase, repetition, attributes, generated values,
-   operation, exception, and compare result.
-9. After each batch, wait 15 seconds before starting validation. Then poll the
-   Compare Engine until all mutated objects return `DataSame` or the configured
-   validation timeout expires. A single immediate compare attempt is not
-   sufficient.
-10. Validate both recipient and link effects as applicable, with the required
+8. The initial one-property coverage batch uses an explicit three-stage state
+    machine: `MUTATE_ALL -> WAIT_15_SECONDS -> COMPARE_ALL`. Do not start the
+    wait or any comparison until every object selected for that initial batch
+    has been attempted.
+   Persist live progress throughout the batch:
+   `Stage`, `ObjectsAttempted`, `ObjectCount`, `ObjectsSucceeded`,
+   `ObjectsFailed`, `ObjectsToCompare`, and `ObjectsCompared`. A monitor must
+   be able to report `m/N` while mutation or comparison is active.
+9. Only the initial coverage batch aggregates failures. Continue through its
+    complete randomized object list, collect every LDAP mutation failure, then
+    poll every successfully mutated object until it reaches `DataSame` or its
+    configured deadline. After every object has a terminal result, emit one
+    report containing every initial-batch mutation failure, cookie timeout,
+    compare timeout, non-`DataSame` object, divergent property, generated value,
+    and exception.
+10. Repetitions 1, 2, and 3 retain fail-fast behavior. Stop the current
+     repetition at the first mutation failure, cookie timeout, comparison error,
+     compare timeout, or non-`DataSame` terminal result. Do not start the next
+     repetition after a failure. A single immediate compare attempt is not
+     sufficient.
+11. Validate both recipient and link effects as applicable, with the required
     A/B cookies. Preserve the existing six-cookie and full-sync readiness
     checks.
-11. Log every randomized choice and each LDAP change in JSONL. Keep logs
+12. Log every randomized choice and each LDAP change in JSONL. Keep logs
     bounded or rotated so individual files remain at most 4 MB.
-12. "Pure" means the current mutation command touches only the named property
+13. "Pure" means the current mutation command touches only the named property
     family. Values left by earlier successful phases may remain.
-13. Before deleting an attribute, verify that the selected value exists. If it
+14. Before deleting an attribute, verify that the selected value exists. If it
     is absent, seed a valid value, wait for sync, and require a `DataSame`
-    baseline before performing and validating the deletion.
-14. For multivalued deletion, randomly choose either:
+    baseline during a separate batch-preparation stage before `MUTATE_ALL`.
+    Seed every object first, validate the seeded GUIDs together, and only then
+    begin deletion mutations. Persist preparation progress separately from
+    completed deletion GUIDs.
+15. For multivalued deletion, randomly choose either:
     - remove one or more selected values while retaining at least one value, or
     - clear the entire attribute.
     Record which deletion mode was used.
-15. Recipient and link arrays overlap on some LDAP names. In a mixed batch,
+    Never delete `msExchCU` or `msExchOURoot`; they are tenant identity anchors
+    required to construct a valid Exchange organization identity.
+16. Recipient and link arrays overlap on some LDAP names. In a mixed batch,
     resample or deduplicate so the same LDAP attribute is not assigned two
     conflicting operations or values in one LDAP modify request.
-16. Combine as many compatible selected attributes as possible into one LDAP
-    Modify operation. If schema or command semantics require multiple
-    operations, use the minimum number and log why the batch was split.
-17. Each phase consists of one initial one-property-per-object batch followed
-    by two variable-width repetitions, for three batches per phase.
+17. Combine compatible selected attributes into bounded LDAP Modify operations.
+    Enforce documented ADWS/LDAP attribute-count and encoded-payload limits;
+    split before a request reaches either limit and log why it was split.
+18. Each phase consists of one initial one-property-per-object batch followed
+    by three variable-width repetitions, for four batches per phase.
 
 ## Coverage-Aware Initial Batch
 
@@ -96,8 +120,11 @@ is selected at least once when the object count is at least the property count.
 Do not independently sample with replacement, because that can leave properties
 untested.
 
-After mutating all objects in the initial batch, wait 15 seconds and validate
-the full batch.
+The initial-batch mutation barrier is absolute: first attempt exactly one
+property mutation for every randomized object. Only after all objects have
+been attempted may the harness wait 15 seconds and validate the full batch.
+Comparison must reach a terminal result for every initial-batch object and
+report all failures together.
 
 ## Variable-Width Repetitions
 
@@ -107,9 +134,30 @@ For an object at one-based randomized position `m`, select:
 1 + (m % property-count)
 ```
 
-unique properties from the phase's array. Perform the batch, wait 15 seconds,
-and validate all mutated objects. Repeat this process two times, reshuffling
-objects and property selections for every repetition.
+unique properties from the phase's array. Complete the mutation pass, wait
+15 seconds, and validate the mutated objects. Repetitions are fail-fast: stop
+at the first mutation or terminal validation failure. Repeat this process three
+times, reshuffling objects and property selections for every repetition.
+
+## Universal Step and Phase Gates
+
+Apply the same progression rule to every User, Group, Recipient-property,
+Link-property, Mixed, Upsert, and Deletion scenario:
+
+1. Finish the current mutation step for its full intended object set unless a
+   repetition's fail-fast mutation error stops it.
+2. Do not start comparison until the mutation step reaches its barrier.
+3. Do not start the next batch/repetition until the current comparison step
+   passes.
+4. Do not start the next phase until all four batches of the current phase
+   pass.
+5. If the current step fails, preserve its exact checkpoint and resume inside
+   that step after the defect is fixed. Never skip ahead to another batch or
+   phase, and never replay already completed objects.
+
+The initial batch comparison reports all failures together. Repetitions 1-3
+remain fail-fast at the first terminal failure, but both behaviors enforce the
+same rule: a failed step blocks every later step.
 
 ## Execution Order
 
@@ -129,14 +177,81 @@ Run the 12 phases in exactly this order:
 12. Mixed Group Deletion
 
 All upsert phases, including mixed upserts, must complete before any deletion
-phase starts. Each phase has exactly three batches: the initial coverage batch,
-repetition 1, and repetition 2, for 36 batches total.
+phase starts. Each phase has exactly four batches: the initial coverage batch
+and repetitions 1, 2, and 3, for 48 batches total.
+
+Phase transitions reuse the existing 235 User recipients or 267 Group
+recipients from the run ledger. Do not recreate, replace, or renumber objects
+that passed the previous phase.
 
 The checkpoint records the phase-plan version and batches-per-phase value.
 Checkpoints from an older ScenarioTest plan must not be resumed; start a new
 run instead. The prior failed preflight run generated no scenario traffic.
 
-For a read-only live validation, run ScenarioTest with `-PreflightOnly`. This
+For each active batch, sort source objects by GUID before seeded shuffling and
+persist the materialized position, object GUID, selected properties, and
+required cookies in `scenario-plan-pNN-bNN.json`. Resume that exact plan rather
+than rebuilding it from hashtable enumeration order.
+
+Publish status, checkpoint, qualification-progress, plan, and summary JSON
+through unique same-volume temporary files and atomic replacement. Retry only
+short `IOException` replacement conflicts so a concurrent monitor read cannot
+pause otherwise healthy traffic.
+
+## Exhaustive Harness Qualification
+
+The harness must discover generator, planner, target-selection, and command
+construction defects before scenario traffic. It must provide a qualification
+mode that executes the complete deterministic plan without advancing the real
+scenario checkpoint.
+
+Qualification must:
+
+1. Materialize every phase, all four batches, every randomized object position,
+   every selected property, and every generated value for the requested seed.
+2. Validate all values against LDAP schema syntax, single/multivalue shape,
+   `rangeLower`, `rangeUpper`, enum/domain restrictions, XML serialization
+   contracts, GUID/SID/binary formats, and property-specific invariants.
+3. Validate semantic targets, not only DN syntax. Examples:
+   - `msExchCU` must target the tenant configuration unit;
+   - `msExchOURoot` must target the organization root;
+   - `homeMTA` must target a valid MTA;
+   - policy GUID-string properties must contain valid policy object GUIDs;
+   - mailbox, database, policy, recipient, group, server, and computer links
+     must target objects of the required class and tenant.
+4. Exercise the real request planner and prove every AD read and LDAP Modify is
+   split below supported attribute-count and encoded-payload limits.
+5. Use isolated disposable User and Group probe objects to perform representative
+   LDAP writes and read-backs for every distinct property/value shape. Restore or
+   delete only those probe objects afterward.
+6. Continue qualification after an individual property fails. Aggregate every
+   failure by phase, batch, position, property, generated value, target, command,
+   and exception, then fail once with the complete defect list.
+7. Produce a machine-readable qualification report. Scenario traffic must not
+   start unless that report contains zero harness defects.
+8. Publish `qualification-progress.json` while the deterministic plan is being
+   checked. It must include current phase, batch, object position, batch object
+   count, completed object-plans, total object-plans, percentage, generated
+   selection/value counts, and failures found so far. Monitoring must report
+   both batch `m/N` and overall `m/N`.
+
+A syntax-only parse, one representative generated value, or one comparison
+probe is not sufficient qualification for a new run.
+
+For a resume of the same plan-version checkpoint, reuse the run directory's
+existing zero-defect `qualification.json`. Do not rerun the full environment
+preflight, qualification visits, completed scenario batches, or completed
+object mutations. Validate the specific script fix through its affected
+runtime seam, restore the persisted runtime target context, and continue from
+the saved object position. Build and persist target context only when no valid
+same-plan cache exists.
+
+Run the full preflight on resume only when direct evidence ties the failure to
+preflight, environment, dependency, cookie, comparison-runtime, configuration,
+or target-discovery state. The operator can explicitly request this with
+`-ForceFullPreflightOnResume`.
+
+For a read-only environment validation, run ScenarioTest with `-PreflightOnly`. This
 loads the Windows PowerShell Exchange snap-in, resolves the forest, validates
 the six A/B Object Store sync cookies and compare cookies, checks schema/value
 prerequisites, performs one non-uploading comparison runtime probe, and exits
@@ -238,26 +353,28 @@ link-property changes in the same logical batch.
    - Remove selected values or clear attributes. Do not upsert.
 
 For the initial mixed batch, select at least one distinct recipient property and
-one distinct link property for every object. For the two variable-width
+one distinct link property for every object. For the three variable-width
 repetitions, combine the selected recipient and link mutations into the fewest
-valid LDAP Modify requests.
+bounded, valid LDAP Modify requests.
 
-## Ranged-Link Telemetry
+## Ranged-Link Validation
 
 When a genuine `msExchMultiMailboxDatabasesLink` mutation occurs:
 
-- require `Found RecipientChange.MaterialRangedAttr.` telemetry for both sync
-  sides;
-- read the four lexically newest Object Store sync log files using
-  `FileStream(Open, Read, FileShare.ReadWrite | FileShare.Delete)`;
-- do not filter candidate files by `LastWriteTimeUtc`;
-- do not require telemetry for a no-op mutation.
+- wait for the required Object Store sync-cookie watermarks;
+- poll AD-to-Object Store comparison until the object returns `DataSame`;
+- fail on timeout or any persistent base/link divergence;
+- do not require implementation-specific sync log messages.
+
+Internal branch names and log text may change without changing the externally
+observable synchronization contract.
 
 ## Completion Criteria
 
 The scenario passes only when:
 
-- all 12 phases complete their initial batch and two repetitions;
+- exhaustive harness qualification completes with zero defects;
+- all 12 phases complete their initial batch and three repetitions;
 - every attempted LDAP operation succeeds;
 - every mutated object eventually validates as `DataSame`;
 - no consistency divergence, compare timeout, relevant process crash, or
@@ -265,12 +382,12 @@ The scenario passes only when:
 - all six sync cookies remain present and full-sync complete;
 - `SkipNonMaterialRecipientChangeEnabled` remains at the requested test value;
 - OLS and Directory Cache remain running;
-- ranged-link mutations have the required A/B telemetry;
+- ranged-link mutations reach `DataSame` on the required sync sides;
 - cleanup removes every ledger-owned mail contact, group, and supporting target
   object created by the run.
 
 Produce a final report containing object counts, per-phase operations, every
 attribute exercised, value/deletion modes, compare totals, `DataSame` totals,
-divergences, ranged telemetry evidence, failures, service/crash health, random
+divergences, ranged-mutation counts, failures, service/crash health, random
 seed, elapsed time, and cleanup results. Separate product failures from harness,
 environment, and invalid-test-data failures.

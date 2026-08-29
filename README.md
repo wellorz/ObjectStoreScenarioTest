@@ -71,6 +71,57 @@ bootstrap, including transitive assembly loading, before any test objects are cr
 It also rejects AD-owned operational attributes such as `objectCategory` if they
 are accidentally added to an upsert property array.
 
+Before ScenarioTest traffic, run the exhaustive harness qualification required
+by `ScenarioTest.md`. It materializes the complete deterministic 48-batch plan,
+validates every generated value and semantic target, exercises bounded ADWS and
+LDAP request planning, and aggregates all probe-write defects into one report.
+Do not use the live scenario to discover generator defects one at a time.
+During deterministic qualification, `qualification-progress.json` exposes the
+current phase, batch, object `m/N`, overall object-plan `m/N`, percentage, and
+failure count for monitoring.
+
+When resuming the same plan-version run, the harness reuses its existing
+zero-defect `qualification.json` and checkpoint. By default it skips the full
+preflight and does not repeat completed qualification visits, batches, or
+object mutations. Use `-ForceFullPreflightOnResume` only for a failure proven
+to involve preflight or environment state.
+
+The run also persists `scenario-target-context.clixml`. A matching resume
+restores this cache instead of repeating the 21 isolated Exchange/AD target
+queries, each of which otherwise starts a fresh Windows PowerShell child.
+
+Each active scenario batch persists its deterministic object/property mapping
+in `scenario-plan-pNN-bNN.json`. Deletion batches first prepare and seed every
+object, validate all seeded GUIDs at one barrier, and then execute
+`MUTATE_ALL`. Preparation progress is checkpointed independently from completed
+deletions. Tenant identity anchors `msExchCU` and `msExchOURoot` are never
+selected for deletion.
+
+Monitored JSON snapshots use unique temporary files and atomic same-volume
+replacement with bounded retry. Concurrent reads therefore see a complete old
+or new snapshot without racing the scenario writer.
+
+The initial ScenarioTest coverage batch has a strict barrier: attempt one
+property mutation for every randomized object, wait 15 seconds, then compare
+every successfully mutated object and report all failures together.
+Repetitions 1–3 retain fail-fast behavior.
+
+ScenarioTest creates its 235 mail contacts and 267 distribution groups once,
+then reuses those same ledger-owned objects across all applicable phases.
+Objects advance only after the previous phase passed comparison; failed objects
+are not replaced with newly provisioned objects.
+
+The mutation/comparison barrier applies to every scenario and phase. A later
+batch starts only after the current batch passes comparison, and a later phase
+starts only after all four batches of the current phase pass. Repairs resume
+the failed step at its saved object position without replaying completed
+objects or skipping forward.
+
+During an active batch, `status.json` and `checkpoint.json` expose the current
+stage plus live `ObjectsAttempted/ObjectCount` and
+`ObjectsCompared/ObjectsToCompare` counters. Monitors should report these as
+`m/N` progress rather than only saying that scenario traffic is running.
+
 For monitoring, use `Get-DirectoryObjectStoreScenarioStatus.ps1`. The harness
 atomically refreshes the bounded `status.json` file at every checkpoint and on
 terminal completion, so a reporter does not need to parse growing JSONL logs.
@@ -141,7 +192,9 @@ The text log uses this format:
 
 ## Failure behavior
 
-On the first failure the script stops generating traffic and creates:
+For the initial coverage batch, the script completes full mutation and
+comparison accounting and reports all failures together. For repetitions 1–3,
+it pauses on the first failure. In either case it creates:
 
 - `PAUSED`
 - `failure-<timestamp>\failure.json`
