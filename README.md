@@ -89,6 +89,41 @@ repair can add time.
 mean an AD user or mailbox user. `Group` means a distribution group created by
 the harness.
 
+## Skill versus MCP
+
+ObjectStoreScenarioTest is an **agent skill plus PowerShell scripts**. It is
+not an MCP server and does not require an MCP server when an operator runs the
+scripts directly on the TDS machine.
+
+For Copilot-driven remote TDS setup, execution, and monitoring, the skill uses
+an independently managed SubstrateMCP server exposing tools such as
+`tds_execute_powershell` and `tds_copy_files`. SubstrateMCP is not bundled in
+this repository.
+
+Install the internal SubstrateMCP server in Copilot CLI:
+
+```powershell
+copilot mcp add substratemcp -- `
+    agency artifact exec `
+    --feed https://pkgs.dev.azure.com/o365exchange/_packaging/Enzyme/nuget/v3/index.json `
+    --name Microsoft.Substrate.SubstrateMCP `
+    --type nuget `
+    --rid none `
+    -- tools\any\win-x64\SubstrateDevelopmentMCP.Hosts.Console mcp start
+```
+
+This requires the Microsoft `agency` tool and access to the O365 Exchange
+Enzyme feed. Verify the installation:
+
+```powershell
+copilot mcp list
+copilot mcp get substratemcp
+```
+
+Inside an interactive session, use `/mcp` to view or manage configured
+servers. Start a new session or use `/restart` if the newly added tools are not
+visible.
+
 ## Preflight and qualification
 
 A new command run performs:
@@ -195,6 +230,11 @@ Always resume with the original workload and command:
 The checkpoint persists `WorkloadMode` and `ScenarioCommand`. A mismatched
 resume is rejected before state restoration or traffic.
 
+Resume also requires the original organization, side, Object Store
+destination, object prefix, random seed, simulation mode, comparison setup,
+and runtime dependency path. This prevents a checkpoint from one tenant or
+execution mode being applied to another.
+
 Compatible resumes restore:
 
 - `scenario-target-context.clixml`, avoiding repeated target discovery;
@@ -256,11 +296,68 @@ workload-mode compatibility is enforced.
 
 ## Copilot skill installation
 
-The canonical runbook is `SKILL.md`. For automatic discovery, the repository
-also contains:
+Clone the repository:
+
+```powershell
+git clone https://github.com/wellorz/ObjectStoreScenarioTest.git
+Set-Location .\ObjectStoreScenarioTest
+```
+
+### Project installation
+
+The repository already contains the project skill at:
 
 ```text
 .github/skills/scenario-test-runner/SKILL.md
+```
+
+Start Copilot CLI from the repository root:
+
+```powershell
+copilot
+```
+
+Then verify:
+
+```text
+/skills reload
+/skills info scenario-test-runner
+```
+
+### Personal installation
+
+To make the skill available in other repositories, register the cloned skill
+collection:
+
+```powershell
+copilot skill add Q:\src\ObjectStoreScenarioTest\.github\skills
+```
+
+Inside an existing Copilot CLI session:
+
+```text
+/skills reload
+/skills info scenario-test-runner
+```
+
+You can also copy the complete `scenario-test-runner` directory to:
+
+```text
+%USERPROFILE%\.copilot\skills\scenario-test-runner
+```
+
+The skill directory includes `SKILL.md`, the harness, status script, scenario
+contract, and README. Runtime dependency binaries must still be provisioned
+separately.
+
+After installation, invoke it with one of:
+
+```text
+User-Upsert
+Group-Upsert
+User-Properties-Deletion
+Group-Properties-Deletion
+RunAll
 ```
 
 Keep the root and discoverable copies synchronized when changing the skill.

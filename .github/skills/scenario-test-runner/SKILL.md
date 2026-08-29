@@ -59,9 +59,11 @@ read it explicitly before operating the scenario.
 
 To share it through the ObjectStoreScenarioTest repository, keep the scripts
 and documentation at the repository root and copy `SKILL.md` to
-`.github/skills/scenario-test-runner/SKILL.md` for automatic discovery.
-Provision `RuntimeDependencies\net472` separately from an authorized internal
-build; do not commit compiled Exchange binaries to the repository.
+`.github/skills/scenario-test-runner/` with the harness, status script,
+scenario contract, and README for automatic discovery and personal
+installation. Provision `RuntimeDependencies\net472` separately from an
+authorized internal build; do not commit compiled Exchange binaries to the
+repository.
 
 Use existing project skills only for their narrow supporting roles:
 
@@ -79,6 +81,22 @@ Use existing project skills only for their narrow supporting roles:
 
 Do not invoke a supporting skill merely because it is available. The active
 harness and its TDS run directory remain the source of truth.
+
+SubstrateMCP is a separate prerequisite for Copilot-driven remote TDS
+operations. Install it with:
+
+```powershell
+copilot mcp add substratemcp -- `
+    agency artifact exec `
+    --feed https://pkgs.dev.azure.com/o365exchange/_packaging/Enzyme/nuget/v3/index.json `
+    --name Microsoft.Substrate.SubstrateMCP `
+    --type nuget `
+    --rid none `
+    -- tools\any\win-x64\SubstrateDevelopmentMCP.Hosts.Console mcp start
+```
+
+This requires `agency` and authorized Enzyme feed access. Do not add tokens,
+passwords, or feed credentials to this repository or the command.
 
 ## Required inputs and discovery
 
@@ -155,6 +173,11 @@ may return to `PREFLIGHT` after its prerequisite is corrected.
 A resumed run must load and verify the exact TDS run directory. Reconstruct
 missing session state from TDS artifacts when necessary. Never attach to a PID
 or run merely because it is the newest one.
+
+Before modifying any resume artifact, require the original workload, scenario
+command, organization, side, Object Store destination, object prefix, random
+seed, WhatIf mode, comparison setup, and runtime dependency path. Reject a
+cross-tenant, cross-destination, or simulation-to-live resume.
 
 ## 1. Full preflight
 

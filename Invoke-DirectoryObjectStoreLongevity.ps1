@@ -2474,12 +2474,80 @@ function Initialize-ScenarioPopulationIdentities
     Save-Checkpoint
 }
 
+function Assert-ScenarioResumeParameters
+{
+    $parametersPath = Join-Path $script:RunDirectory "parameters.json"
+    if (-not (Test-Path -LiteralPath $parametersPath))
+    {
+        throw "ScenarioTest resume parameters are missing: $parametersPath"
+    }
+
+    $saved = Get-Content -LiteralPath $parametersPath -Raw | ConvertFrom-Json
+    $savedPropertyNames = @(
+        $saved.PSObject.Properties |
+            ForEach-Object { $_.Name }
+    )
+    $savedScenarioCommand =
+        if ($savedPropertyNames -contains "ScenarioCommand" -and
+            -not [string]::IsNullOrWhiteSpace([string]$saved.ScenarioCommand))
+        {
+            [string]$saved.ScenarioCommand
+        }
+        else
+        {
+            "RunAll"
+        }
+    $mismatches = [Collections.Generic.List[string]]::new()
+    $stringChecks = @(
+        [ordered]@{ Name = "WorkloadMode"; Saved = [string]$saved.WorkloadMode; Requested = $WorkloadMode; CaseSensitive = $false }
+        [ordered]@{ Name = "ScenarioCommand"; Saved = $savedScenarioCommand; Requested = $ScenarioCommand; CaseSensitive = $false }
+        [ordered]@{ Name = "ObjectPrefix"; Saved = [string]$saved.ObjectPrefix; Requested = $ObjectPrefix; CaseSensitive = $true }
+        [ordered]@{ Name = "Organization"; Saved = [string]$saved.Organization; Requested = $Organization; CaseSensitive = $false }
+        [ordered]@{ Name = "Side"; Saved = [string]$saved.Side; Requested = $Side; CaseSensitive = $false }
+        [ordered]@{ Name = "ObjectStoreDestination"; Saved = [string]$saved.ObjectStoreDestination; Requested = $ObjectStoreDestination; CaseSensitive = $false }
+    )
+    if ($WorkloadMode -eq "ScenarioTest")
+    {
+        $stringChecks += [ordered]@{ Name = "ScenarioRuntimeDependencyRoot"; Saved = [string]$saved.ScenarioRuntimeDependencyRoot; Requested = $ScenarioRuntimeDependencyRoot; CaseSensitive = $false }
+        if ($savedPropertyNames -contains "CompareSetupScript")
+        {
+            $stringChecks += [ordered]@{
+                Name = "CompareSetupScript"
+                Saved = [string]$saved.CompareSetupScript
+                Requested = $CompareSetupScript
+                CaseSensitive = $false
+            }
+        }
+    }
+    foreach ($check in $stringChecks)
+    {
+        $comparison = if ($check.CaseSensitive) { [StringComparison]::Ordinal } else { [StringComparison]::OrdinalIgnoreCase }
+        if (-not [string]::Equals([string]$check.Saved, [string]$check.Requested, $comparison))
+        {
+            $mismatches.Add("$($check.Name) ('$($check.Saved)' != '$($check.Requested)')")
+        }
+    }
+    if ([int]$saved.RandomSeed -ne $RandomSeed)
+    {
+        $mismatches.Add("RandomSeed ('$($saved.RandomSeed)' != '$RandomSeed')")
+    }
+    if ([bool]$saved.WhatIfTraffic -ne [bool]$WhatIfTraffic)
+    {
+        $mismatches.Add("WhatIfTraffic ('$([bool]$saved.WhatIfTraffic)' != '$([bool]$WhatIfTraffic)')")
+    }
+    if ($mismatches.Count -gt 0)
+    {
+        throw "ScenarioTest resume parameters are incompatible: $($mismatches -join '; '). Use the original values or start a new run."
+    }
+}
+
 function Initialize-RunDirectory
 {
     if (-not [string]::IsNullOrWhiteSpace($ResumeRunDirectory))
     {
         $script:RunDirectory = (Resolve-Path -LiteralPath $ResumeRunDirectory).Path
         $script:RunId = Split-Path -Leaf $script:RunDirectory
+        Assert-ScenarioResumeParameters
     }
     else
     {
@@ -2556,6 +2624,7 @@ function Initialize-RunDirectory
         Side = $Side
         ObjectStoreDestination = $ObjectStoreDestination
         ScenarioRuntimeDependencyRoot = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioRuntimeDependencyRoot } else { $null }
+        CompareSetupScript = if ($WorkloadMode -eq "ScenarioTest") { $CompareSetupScript } else { $null }
         ConfigureEnvironment = [bool]$ConfigureEnvironment
         SkipDeletionOperations = [bool]$SkipDeletionOperations
         PreflightOnly = [bool]$PreflightOnly
@@ -6707,6 +6776,16 @@ function Get-ScenarioQualificationFingerprint
         BatchesPerPhase = $script:ScenarioBatchesPerPhase
         ScenarioCommand = $ScenarioCommand.ToUpperInvariant()
         RandomSeed = $RandomSeed
+        MachineName = ([string]$env:COMPUTERNAME).ToUpperInvariant()
+        ForestFqdn = ([string]$script:ForestFqdn).ToUpperInvariant()
+        TenantId = $script:TenantId.ToString("D")
+        Organization = ([string]$Organization).ToUpperInvariant()
+        Side = ([string]$Side).ToUpperInvariant()
+        ObjectStoreDestination = ([string]$ObjectStoreDestination).ToUpperInvariant()
+        ObjectPrefix = $ObjectPrefix
+        WhatIfTraffic = [bool]$WhatIfTraffic
+        CompareSetupScript = ([string]$CompareSetupScript).ToUpperInvariant()
+        ScenarioRuntimeDependencyRoot = ([string]$ScenarioRuntimeDependencyRoot).ToUpperInvariant()
         UserObjects = $script:ScenarioCounts.N_User
         GroupObjects = $script:ScenarioCounts.N_Groups
         Phases = $phaseShape
