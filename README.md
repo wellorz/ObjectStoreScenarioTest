@@ -72,7 +72,9 @@ User-Upsert on SG2TDSO3000036 for contoso.com
 ```
 
 The skill announces the selected scenarios, expected population, estimated
-duration, and monitoring cadence before starting.
+duration, automatically discovered organization, generated unique object
+prefix, and monitoring cadence before starting. Users are not prompted to
+choose an object prefix.
 
 For direct PowerShell use, the scripts are located at:
 

@@ -27,11 +27,55 @@ Invoke the harness with the matching `-ScenarioCommand`:
 .\Invoke-DirectoryObjectStoreLongevity.ps1 `
     -WorkloadMode ScenarioTest `
     -ScenarioCommand User-Upsert `
-    -Organization <test-organization> `
-    -ObjectPrefix <unique-prefix> `
+    -Organization $Organization `
+    -ObjectPrefix $ObjectPrefix `
     -Side A `
     -ObjectStoreDestination Test
 ```
+
+## Automatic input resolution
+
+Do not ask the user to choose an object prefix. Generate a new prefix for every
+fresh run using the command code, UTC timestamp, and a six-character GUID
+suffix:
+
+```powershell
+$commandCode = @{
+    "User-Upsert" = "UU"
+    "Group-Upsert" = "GU"
+    "User-Properties-Deletion" = "UD"
+    "Group-Properties-Deletion" = "GD"
+    "RunAll" = "RA"
+}[$ScenarioCommand]
+$ObjectPrefix = "DOS$commandCode-$([datetime]::UtcNow.ToString('MMddHHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0, 6))"
+```
+
+The generated value satisfies the harness's 3-32 character constraint. Report
+it in the start announcement and persist it in run state, but do not ask the
+user to approve or edit it unless they explicitly supplied a prefix.
+
+Resolve the organization without prompting when possible:
+
+1. Use the organization explicitly supplied by the user.
+2. Otherwise query the selected TDS with:
+   ```powershell
+   $organizations = @(
+       Get-AcceptedDomain |
+           Where-Object { $_.Default -eq $true -and $_.DomainType -eq "Authoritative" } |
+           ForEach-Object { $_.DomainName.ToString() } |
+           Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+           Select-Object -Unique
+   )
+   ```
+3. If exactly one eligible organization is found, use it automatically and
+   report the selection.
+4. Ask the user only when no organization can be found or multiple eligible
+   organizations remain after filtering.
+
+Likewise, use an explicitly supplied TDS machine or the active TDS machine.
+Ask only when neither is available or the target is ambiguous. Do not ask for
+confirmation of the selected command, generated prefix, default side `A`,
+destination `Test`, random seed `1729`, or default reporting intervals.
 
 Before starting, tell the user:
 
@@ -40,6 +84,8 @@ Command: <command>
 Scenarios: <ordered scenario names>
 Estimated duration: <estimate>
 Population: <contacts/groups to create>
+Organization: <supplied-or-discovered-organization>
+Object prefix: <automatically-generated-prefix>
 Monitoring: every 2 minutes for the first 10 traffic minutes, then every
 5 minutes while healthy.
 ```
@@ -108,7 +154,8 @@ passwords, or feed credentials to this repository or the command.
    - TDS validation/run
    - stale-state inspection and cleanup
    - object-level diagnostics
-   - organization, side, Object Store destination, compare setup script, runtime dependency root, output root, and object prefix
+   - organization, side, Object Store destination, compare setup script,
+     runtime dependency root, output root, and automatic object-prefix format
 4. Never invent a command, environment, tenant, object identifier, cleanup scope, or success criterion that is absent from `ScenarioTest.md`, the harness, supporting scripts, or command output.
 5. If a required command is not documented, stop before the unsafe step and report the exact missing item plus the evidence collected so far.
 

@@ -48,8 +48,16 @@ on the TDS machine:
     -ScenarioRuntimeDependencyRoot C:\tds\RuntimeDependencies\net472
 ```
 
-Replace `User-Upsert` with any command from the table. Use a unique
-`ObjectPrefix` for every new population.
+Replace `User-Upsert` with any command from the table. When Copilot runs the
+skill, it automatically generates a unique `ObjectPrefix` from the command,
+UTC timestamp, and a six-character GUID suffix, for example:
+
+```text
+DOSUU-0829170744-a1b2c3
+```
+
+Users do not need to choose or approve the prefix. Direct PowerShell callers
+must still provide their own unique `-ObjectPrefix`.
 
 The script records the selected command, phase list, estimate, population
 sizes, and total batch count in `parameters.json`, `status.json`,
@@ -84,6 +92,11 @@ repair can add time.
 - Provision `RuntimeDependencies\net472` from an authorized internal build.
   Do not commit compiled Exchange binaries to this repository.
 - Use a dedicated, unique object prefix.
+
+When the user does not specify an organization, the skill discovers eligible
+test organizations from the default authoritative `Get-AcceptedDomain` result
+on the selected TDS and automatically uses it when exactly one is available.
+It asks only if discovery returns none or remains ambiguous.
 
 `User` means a mail-contact recipient created by this harness. It does not
 mean an AD user or mailbox user. `Group` means a distribution group created by
