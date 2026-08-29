@@ -52,18 +52,14 @@ interval.
 
 ## Discoverability and helper skills
 
-This file is an external runbook at its current location. It is not automatically
-discoverable as a project skill unless it is installed under
-`.github/skills/scenario-test-runner/SKILL.md`. When it remains under `Q:\Work`,
-read it explicitly before operating the scenario.
+This directory is the canonical, self-contained skill package. It includes
+`SKILL.md`, the harness, status helper, scenario contract, and operating guide.
+Share or install the complete `scenario-test-runner` directory; do not create
+or maintain duplicate operational files at the repository root.
 
-To share it through the ObjectStoreScenarioTest repository, keep the scripts
-and documentation at the repository root and copy `SKILL.md` to
-`.github/skills/scenario-test-runner/` with the harness, status script,
-scenario contract, and README for automatic discovery and personal
-installation. Provision `RuntimeDependencies\net472` separately from an
-authorized internal build; do not commit compiled Exchange binaries to the
-repository.
+Provision `RuntimeDependencies\net472` separately from an authorized internal
+build. Do not commit compiled Exchange binaries, credentials, or TDS run
+artifacts to this repository.
 
 Use existing project skills only for their narrow supporting roles:
 

@@ -330,7 +330,7 @@ To make the skill available in other repositories, register the cloned skill
 collection:
 
 ```powershell
-copilot skill add Q:\src\ObjectStoreScenarioTest\.github\skills
+copilot skill add "$PWD\.github\skills"
 ```
 
 Inside an existing Copilot CLI session:
@@ -360,4 +360,6 @@ Group-Properties-Deletion
 RunAll
 ```
 
-Keep the root and discoverable copies synchronized when changing the skill.
+This directory is the single source of truth for the skill. Edit these files
+directly and do not recreate duplicate operational copies at the repository
+root.

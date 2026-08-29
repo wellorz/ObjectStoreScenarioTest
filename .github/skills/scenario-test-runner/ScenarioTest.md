@@ -1,9 +1,8 @@
-# Directory Object Store Scenario Test Implementation Prompt
+# Directory Object Store ScenarioTest Contract
 
-Update `Invoke-DirectoryObjectStoreLongevity.ps1` to add a comprehensive,
-repeatable LDAP attribute scenario test. Do not commit or push repository
-changes. Do not alter or interrupt an active TDS run; start a separate run for
-this scenario.
+This document defines the comprehensive, repeatable LDAP attribute scenario
+test implemented by `Invoke-DirectoryObjectStoreLongevity.ps1`. Do not alter
+or interrupt an active TDS run when validating changes; use a separate run.
 
 ## Object Types
 
