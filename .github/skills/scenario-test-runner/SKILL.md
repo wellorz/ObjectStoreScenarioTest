@@ -82,26 +82,8 @@ Use existing project skills only for their narrow supporting roles:
 Do not invoke a supporting skill merely because it is available. The active
 harness and its TDS run directory remain the source of truth.
 
-If the `object-store-scenario` MCP tools are available, prefer them for the
-five public commands, bounded status, resume, stop, and timing operations.
-The MCP server constrains executable paths, verifies script hashes, and
-launches SubstrateMCP internally.
-
-Install the published stdio MCP package with:
-
-```powershell
-copilot mcp add object-store-scenario -- `
-    dnx Wellorz.ObjectStoreScenarioTest.Mcp@0.1.0-beta `
-    --add-source https://pkgs.dev.azure.com/o365exchange/_packaging/Enzyme/nuget/v3/index.json
-```
-
-This requires `agency` and authorized Enzyme feed access. Do not add tokens,
-passwords, or feed credentials to this repository or the command. The MCP
-server reports the desired interval but cannot initiate chat messages; this
-skill must still create and update the monitoring schedule.
-
-If the ObjectStoreScenarioTest MCP server is unavailable, direct use of
-SubstrateMCP remains a supported operational fallback:
+SubstrateMCP is a separate prerequisite for Copilot-driven remote TDS
+operations. Install it with:
 
 ```powershell
 copilot mcp add substratemcp -- `
@@ -112,6 +94,9 @@ copilot mcp add substratemcp -- `
     --rid none `
     -- tools\any\win-x64\SubstrateDevelopmentMCP.Hosts.Console mcp start
 ```
+
+This requires `agency` and authorized Enzyme feed access. Do not add tokens,
+passwords, or feed credentials to this repository or the command.
 
 ## Required inputs and discovery
 

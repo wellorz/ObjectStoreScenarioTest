@@ -82,12 +82,7 @@ param(
 
     [switch] $ForceFullPreflightOnResume,
 
-    [switch] $WhatIfTraffic,
-
-    [ValidatePattern('^[A-Fa-f0-9]{32}$')]
-    [string] $LaunchToken,
-
-    [string] $McpReadyPath
+    [switch] $WhatIfTraffic
 )
 
 Set-StrictMode -Version Latest
@@ -2276,7 +2271,6 @@ function Save-Checkpoint
         RunId = $script:RunId
         WorkloadMode = $WorkloadMode
         RandomSeed = $RandomSeed
-        LaunchToken = $LaunchToken
         SavedUtc = [datetime]::UtcNow.ToString("o")
         Counters = $script:Counters
         Contacts = @($script:Contacts.Values)
@@ -2656,7 +2650,6 @@ function Initialize-RunDirectory
         ValidationBatchSize = $ValidationBatchSize
         CheckpointIntervalSeconds = $CheckpointIntervalSeconds
         RandomSeed = $RandomSeed
-        LaunchToken = $LaunchToken
         ObjectPrefix = $ObjectPrefix
         Organization = $Organization
         Side = $Side
@@ -9184,29 +9177,6 @@ function Initialize-ScenarioPreflight
 }
 
 Initialize-RunDirectory
-if (-not [string]::IsNullOrWhiteSpace($McpReadyPath))
-{
-    $readyDirectory = Split-Path -Parent $McpReadyPath
-    if (-not [string]::Equals($readyDirectory, $script:RunDirectory, [StringComparison]::OrdinalIgnoreCase))
-    {
-        throw "-McpReadyPath must be inside the active run directory."
-    }
-    $readyTemporaryPath = "$McpReadyPath.tmp.$PID.$([guid]::NewGuid().ToString('N'))"
-    try
-    {
-        [ordered]@{
-            ProcessId = $PID
-            LaunchToken = $LaunchToken
-            RunDirectory = $script:RunDirectory
-            ReadyUtc = [datetime]::UtcNow.ToString("o")
-        } | ConvertTo-Json | Set-Content -LiteralPath $readyTemporaryPath -Encoding UTF8
-        Move-Item -LiteralPath $readyTemporaryPath -Destination $McpReadyPath
-    }
-    finally
-    {
-        Remove-Item -LiteralPath $readyTemporaryPath -Force -ErrorAction SilentlyContinue
-    }
-}
 $runStartedUtc = [datetime]::UtcNow
 
 try

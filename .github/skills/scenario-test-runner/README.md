@@ -89,92 +89,40 @@ repair can add time.
 mean an AD user or mailbox user. `Group` means a distribution group created by
 the harness.
 
-## Skill and stdio MCP server
+## Skill versus MCP
 
-The scripts can still be run directly on TDS. For a narrower Copilot
-interface, this repository also provides the Windows stdio MCP server
-`Wellorz.ObjectStoreScenarioTest.Mcp`.
+ObjectStoreScenarioTest is an **agent skill plus PowerShell scripts**. It is
+not an MCP server and does not require an MCP server when an operator runs the
+scripts directly on the TDS machine.
 
-The server exposes:
+For Copilot-driven remote TDS setup, execution, and monitoring, the skill uses
+an independently managed SubstrateMCP server exposing tools such as
+`tds_execute_powershell` and `tds_copy_files`. SubstrateMCP is not bundled in
+this repository.
 
-- `get_command_catalog`
-- `user_upsert`
-- `group_upsert`
-- `user_properties_deletion`
-- `group_properties_deletion`
-- `run_all`
-- `get_run_status`
-- `resume_run`
-- `stop_run`
-- `get_timing_report`
-
-The MCP server launches SubstrateMCP internally through the Microsoft
-`agency` tool. Consumers do not need to register a second `substratemcp`
-server in Copilot CLI, but they do need `agency` on `PATH` and authorized
-access to the O365 Exchange Enzyme feed. No credentials or runtime Exchange
-binaries are included in the package.
-
-The default administrator-owned paths on TDS are:
-
-```text
-C:\tds\ObjectStoreScenarioTest
-C:\tds\CompareAndRepairSetup.ps1
-C:\tds\RuntimeDependencies\net472
-```
-
-Administrators can override them in the environment that starts Copilot:
-
-| Environment variable | Purpose |
-| --- | --- |
-| `OBJECTSTORE_SCENARIO_REMOTE_ROOT` | Trusted script, run, and launch-log root |
-| `OBJECTSTORE_SCENARIO_COMPARE_SETUP_SCRIPT` | Trusted comparison setup script |
-| `OBJECTSTORE_SCENARIO_RUNTIME_DEPENDENCY_ROOT` | Trusted `net472` runtime dependencies |
-| `OBJECTSTORE_SCENARIO_SUBSTRATE_MCP_COMMAND` | Nested SubstrateMCP launcher, default `agency` |
-| `OBJECTSTORE_SCENARIO_SUBSTRATE_MCP_ARGUMENTS_JSON` | JSON string array overriding launcher arguments |
-
-Executable paths are intentionally not MCP tool arguments. The server
-canonicalizes run directories beneath the configured `Runs` root, rejects
-UNC/device/reparse-point paths, and verifies packaged script hashes before
-execution.
-
-### Install the MCP server from source
-
-Build and register the server:
+Install the internal SubstrateMCP server in Copilot CLI:
 
 ```powershell
-dotnet build .\src\ObjectStoreScenarioTest.Mcp\ObjectStoreScenarioTest.Mcp.csproj -c Release
-
-copilot mcp add object-store-scenario -- `
-    dotnet run `
-    --project Q:\src\ObjectStoreScenarioTest\src\ObjectStoreScenarioTest.Mcp\ObjectStoreScenarioTest.Mcp.csproj `
-    --configuration Release `
-    --no-build
+copilot mcp add substratemcp -- `
+    agency artifact exec `
+    --feed https://pkgs.dev.azure.com/o365exchange/_packaging/Enzyme/nuget/v3/index.json `
+    --name Microsoft.Substrate.SubstrateMCP `
+    --type nuget `
+    --rid none `
+    -- tools\any\win-x64\SubstrateDevelopmentMCP.Hosts.Console mcp start
 ```
 
-Use an absolute project path in the registration. Verify it with:
+This requires the Microsoft `agency` tool and access to the O365 Exchange
+Enzyme feed. Verify the installation:
 
 ```powershell
 copilot mcp list
-copilot mcp get object-store-scenario
+copilot mcp get substratemcp
 ```
 
-### Install the published MCP package
-
-After version `0.1.0-beta` is published to Enzyme:
-
-```powershell
-copilot mcp add object-store-scenario -- `
-    dnx Wellorz.ObjectStoreScenarioTest.Mcp@0.1.0-beta `
-    --add-source https://pkgs.dev.azure.com/o365exchange/_packaging/Enzyme/nuget/v3/index.json
-```
-
-Inside an interactive session, use `/mcp` to inspect the server. Start a new
-session or use `/restart` if newly registered tools are not visible.
-
-The MCP server returns the requested monitoring cadence but cannot send
-unsolicited chat messages. The `scenario-test-runner` skill remains
-responsible for creating and updating the two-minute/five-minute Copilot
-monitoring schedule.
+Inside an interactive session, use `/mcp` to view or manage configured
+servers. Start a new session or use `/restart` if the newly added tools are not
+visible.
 
 ## Preflight and qualification
 
@@ -236,12 +184,9 @@ Use the bounded status helper:
 
 ```powershell
 .\Get-DirectoryObjectStoreScenarioStatus.ps1 `
-    -RunDirectory C:\tds\ObjectStoreScenarioTest\Runs\<run-id> `
-    -AllowedRunsRoot C:\tds\ObjectStoreScenarioTest\Runs `
-    -AllowedLaunchRoot C:\tds\ObjectStoreScenarioTest\LaunchLogs `
+    -RunDirectory C:\tds\ScenarioTest\Runs\<run-id> `
     -ProcessId <pid> `
     -ResumeStartedUtc <process-start-utc> `
-    -LaunchToken <32-character-launch-token> `
     -StandardErrorPath <stderr-path>
 ```
 
@@ -416,23 +361,3 @@ RunAll
 ```
 
 Keep the root and discoverable copies synchronized when changing the skill.
-
-## MCP development and publication
-
-Run the protocol integration test:
-
-```powershell
-dotnet run `
-    --project .\tests\ObjectStoreScenarioTest.Mcp.IntegrationTests\ObjectStoreScenarioTest.Mcp.IntegrationTests.csproj `
-    --configuration Release
-```
-
-Create the self-contained Windows MCP NuGet package:
-
-```powershell
-dotnet pack .\src\ObjectStoreScenarioTest.Mcp\ObjectStoreScenarioTest.Mcp.csproj -c Release
-```
-
-Publish the generated `.nupkg` through the approved authenticated Enzyme feed
-workflow. Do not put feed tokens or API keys in this repository or in shared
-installation commands.
