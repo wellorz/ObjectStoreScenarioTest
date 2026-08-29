@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "description": "Runs and monitors Directory Object Store ScenarioTest workflows on TDS.",
+  "name": "io.github.wellorz/object-store-scenario-test",
+  "version": "0.1.0-beta",
+  "packages": [
+    {
+      "registryType": "nuget",
+      "registryBaseUrl": "https://pkgs.dev.azure.com/o365exchange/_packaging/Enzyme/nuget/v3/index.json",
+      "identifier": "Wellorz.ObjectStoreScenarioTest.Mcp",
+      "version": "0.1.0-beta",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [],
+      "environmentVariables": []
+    }
+  ],
+  "repository": {
+    "url": "https://github.com/wellorz/ObjectStoreScenarioTest",
+    "source": "github"
+  }
+}

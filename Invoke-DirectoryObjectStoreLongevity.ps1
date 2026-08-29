@@ -82,7 +82,12 @@ param(
 
     [switch] $ForceFullPreflightOnResume,
 
-    [switch] $WhatIfTraffic
+    [switch] $WhatIfTraffic,
+
+    [ValidatePattern('^[A-Fa-f0-9]{32}$')]
+    [string] $LaunchToken,
+
+    [string] $McpReadyPath
 )
 
 Set-StrictMode -Version Latest
@@ -2271,6 +2276,7 @@ function Save-Checkpoint
         RunId = $script:RunId
         WorkloadMode = $WorkloadMode
         RandomSeed = $RandomSeed
+        LaunchToken = $LaunchToken
         SavedUtc = [datetime]::UtcNow.ToString("o")
         Counters = $script:Counters
         Contacts = @($script:Contacts.Values)
@@ -2497,9 +2503,33 @@ function Assert-ScenarioResumeParameters
         {
             "RunAll"
         }
+    $savedWorkloadMode =
+        if ($savedPropertyNames -contains "WorkloadMode" -and
+            -not [string]::IsNullOrWhiteSpace([string]$saved.WorkloadMode))
+        {
+            [string]$saved.WorkloadMode
+        }
+        else
+        {
+            $checkpointPath = Join-Path $script:RunDirectory "checkpoint.json"
+            if (Test-Path -LiteralPath $checkpointPath)
+            {
+                $checkpoint = Get-Content -LiteralPath $checkpointPath -Raw | ConvertFrom-Json
+                if ($checkpoint.PSObject.Properties.Name -contains "ScenarioPlanVersion" -and
+                    $null -ne $checkpoint.ScenarioPlanVersion -and
+                    [int]$checkpoint.ScenarioPlanVersion -gt 0)
+                {
+                    "ScenarioTest"
+                }
+            }
+        }
+    if ([string]::IsNullOrWhiteSpace($savedWorkloadMode))
+    {
+        throw "ScenarioTest resume parameters do not identify the original workload. Start a new run rather than guessing."
+    }
     $mismatches = [Collections.Generic.List[string]]::new()
     $stringChecks = @(
-        [ordered]@{ Name = "WorkloadMode"; Saved = [string]$saved.WorkloadMode; Requested = $WorkloadMode; CaseSensitive = $false }
+        [ordered]@{ Name = "WorkloadMode"; Saved = $savedWorkloadMode; Requested = $WorkloadMode; CaseSensitive = $false }
         [ordered]@{ Name = "ScenarioCommand"; Saved = $savedScenarioCommand; Requested = $ScenarioCommand; CaseSensitive = $false }
         [ordered]@{ Name = "ObjectPrefix"; Saved = [string]$saved.ObjectPrefix; Requested = $ObjectPrefix; CaseSensitive = $true }
         [ordered]@{ Name = "Organization"; Saved = [string]$saved.Organization; Requested = $Organization; CaseSensitive = $false }
@@ -2508,7 +2538,11 @@ function Assert-ScenarioResumeParameters
     )
     if ($WorkloadMode -eq "ScenarioTest")
     {
-        $stringChecks += [ordered]@{ Name = "ScenarioRuntimeDependencyRoot"; Saved = [string]$saved.ScenarioRuntimeDependencyRoot; Requested = $ScenarioRuntimeDependencyRoot; CaseSensitive = $false }
+        if ($savedPropertyNames -contains "ScenarioRuntimeDependencyRoot" -and
+            -not [string]::IsNullOrWhiteSpace([string]$saved.ScenarioRuntimeDependencyRoot))
+        {
+            $stringChecks += [ordered]@{ Name = "ScenarioRuntimeDependencyRoot"; Saved = [string]$saved.ScenarioRuntimeDependencyRoot; Requested = $ScenarioRuntimeDependencyRoot; CaseSensitive = $false }
+        }
         if ($savedPropertyNames -contains "CompareSetupScript")
         {
             $stringChecks += [ordered]@{
@@ -2551,7 +2585,10 @@ function Initialize-RunDirectory
     }
     else
     {
-        $script:RunId = "{0}-{1}" -f ([datetime]::UtcNow.ToString("yyyyMMdd-HHmmss")), $RandomSeed
+        $script:RunId = "{0}-{1}-{2}" -f `
+            ([datetime]::UtcNow.ToString("yyyyMMdd-HHmmssfff")), `
+            $RandomSeed, `
+            ([guid]::NewGuid().ToString("N").Substring(0, 8))
         $script:RunDirectory = Join-Path $OutputRoot $script:RunId
         New-Item -Path $script:RunDirectory -ItemType Directory -Force | Out-Null
     }
@@ -2619,6 +2656,7 @@ function Initialize-RunDirectory
         ValidationBatchSize = $ValidationBatchSize
         CheckpointIntervalSeconds = $CheckpointIntervalSeconds
         RandomSeed = $RandomSeed
+        LaunchToken = $LaunchToken
         ObjectPrefix = $ObjectPrefix
         Organization = $Organization
         Side = $Side
@@ -9146,6 +9184,29 @@ function Initialize-ScenarioPreflight
 }
 
 Initialize-RunDirectory
+if (-not [string]::IsNullOrWhiteSpace($McpReadyPath))
+{
+    $readyDirectory = Split-Path -Parent $McpReadyPath
+    if (-not [string]::Equals($readyDirectory, $script:RunDirectory, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "-McpReadyPath must be inside the active run directory."
+    }
+    $readyTemporaryPath = "$McpReadyPath.tmp.$PID.$([guid]::NewGuid().ToString('N'))"
+    try
+    {
+        [ordered]@{
+            ProcessId = $PID
+            LaunchToken = $LaunchToken
+            RunDirectory = $script:RunDirectory
+            ReadyUtc = [datetime]::UtcNow.ToString("o")
+        } | ConvertTo-Json | Set-Content -LiteralPath $readyTemporaryPath -Encoding UTF8
+        Move-Item -LiteralPath $readyTemporaryPath -Destination $McpReadyPath
+    }
+    finally
+    {
+        Remove-Item -LiteralPath $readyTemporaryPath -Force -ErrorAction SilentlyContinue
+    }
+}
 $runStartedUtc = [datetime]::UtcNow
 
 try
