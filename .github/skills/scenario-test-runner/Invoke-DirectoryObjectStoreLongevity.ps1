@@ -8,6 +8,9 @@ param(
     [ValidateSet("User-Upsert", "Group-Upsert", "User-Properties-Deletion", "Group-Properties-Deletion", "RunAll")]
     [string] $ScenarioCommand = "RunAll",
 
+    [ValidateSet("Full", "MiniSet")]
+    [string] $ScenarioSetMode = "Full",
+
     [ValidateRange(0.001, 720)]
     [double] $DurationHours = 84,
 
@@ -96,6 +99,10 @@ if ($WorkloadMode -ne "ScenarioTest" -and $PSBoundParameters.ContainsKey("Scenar
 {
     throw "-ScenarioCommand is supported only with -WorkloadMode ScenarioTest."
 }
+if ($WorkloadMode -ne "ScenarioTest" -and $PSBoundParameters.ContainsKey("ScenarioSetMode"))
+{
+    throw "-ScenarioSetMode is supported only with -WorkloadMode ScenarioTest."
+}
 
 if ([string]::IsNullOrWhiteSpace($OutputRoot))
 {
@@ -163,7 +170,7 @@ $script:ScenarioLogNextIndex = @{}
 $script:ScenarioTotalObjectWork = 0L
 $script:ScenarioCompletedObjectWork = 0L
 $script:ScenarioPlanVersion = 4
-$script:ScenarioBatchesPerPhase = 4
+$script:ScenarioBatchesPerPhase = if ($ScenarioSetMode -eq "MiniSet") { 1 } else { 4 }
 $script:ScenarioBatchFailures = [Collections.Generic.List[object]]::new()
 $script:ScenarioState = [ordered]@{
     NextPhaseIndex = 0
@@ -1446,6 +1453,17 @@ function Get-ScenarioCommandDefinition
     }
 }
 
+function Get-ScenarioEstimatedMinutes
+{
+    $fullEstimate = [int](Get-ScenarioCommandDefinition).EstimatedMinutes
+    if ($ScenarioSetMode -eq "MiniSet")
+    {
+        return [int][math]::Ceiling($fullEstimate / 4.0)
+    }
+
+    return $fullEstimate
+}
+
 function ConvertTo-JsonLine
 {
     param([Parameter(Mandatory)] [object] $InputObject)
@@ -2245,7 +2263,8 @@ function Write-RunStatusSnapshot
         ProcessId = $PID
         Status = $Status
         ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
-        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { (Get-ScenarioCommandDefinition).EstimatedMinutes } else { $null }
+        ScenarioSetMode = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioSetMode } else { $null }
+        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioEstimatedMinutes } else { $null }
         ScenarioBatchTotal = if ($WorkloadMode -eq "ScenarioTest") { @((Get-ScenarioCommandDefinition).PhaseNames).Count * $script:ScenarioBatchesPerPhase } else { $null }
         StopRequested = $script:StopRequested
         Failure = $script:Failure
@@ -2282,6 +2301,7 @@ function Save-Checkpoint
         ScenarioPlanVersion = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioPlanVersion } else { $null }
         ScenarioBatchesPerPhase = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioBatchesPerPhase } else { $null }
         ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
+        ScenarioSetMode = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioSetMode } else { $null }
         ScenarioState = $script:ScenarioState
         ScenarioCompletedObjectWork = $script:ScenarioCompletedObjectWork
         ScenarioBatchSummaries = @($script:ScenarioBatchSummaries)
@@ -2373,6 +2393,24 @@ function Restore-Checkpoint
         if (-not [string]::Equals($checkpointScenarioCommand, $ScenarioCommand, [StringComparison]::OrdinalIgnoreCase))
         {
             throw "ScenarioTest checkpoint command '$checkpointScenarioCommand' is incompatible with requested command '$ScenarioCommand'. Resume with the original command or start a new run."
+        }
+        $checkpointScenarioSetMode =
+            if ($state.PSObject.Properties.Name -contains "ScenarioSetMode" -and
+                -not [string]::IsNullOrWhiteSpace([string]$state.ScenarioSetMode))
+            {
+                [string]$state.ScenarioSetMode
+            }
+            elseif ($checkpointBatchesPerPhase -eq 1)
+            {
+                "MiniSet"
+            }
+            else
+            {
+                "Full"
+            }
+        if (-not [string]::Equals($checkpointScenarioSetMode, $ScenarioSetMode, [StringComparison]::OrdinalIgnoreCase))
+        {
+            throw "ScenarioTest checkpoint set mode '$checkpointScenarioSetMode' is incompatible with requested mode '$ScenarioSetMode'. Resume with the original -ScenarioSetMode value or start a new run."
         }
         if ([int]$state.RandomSeed -ne $RandomSeed)
         {
@@ -2497,6 +2535,33 @@ function Assert-ScenarioResumeParameters
         {
             "RunAll"
         }
+    $savedScenarioSetMode =
+        if ($savedPropertyNames -contains "ScenarioSetMode" -and
+            -not [string]::IsNullOrWhiteSpace([string]$saved.ScenarioSetMode))
+        {
+            [string]$saved.ScenarioSetMode
+        }
+        else
+        {
+            $checkpointPath = Join-Path $script:RunDirectory "checkpoint.json"
+            if (Test-Path -LiteralPath $checkpointPath)
+            {
+                $checkpoint = Get-Content -LiteralPath $checkpointPath -Raw | ConvertFrom-Json
+                if ($checkpoint.PSObject.Properties.Name -contains "ScenarioBatchesPerPhase" -and
+                    [int]$checkpoint.ScenarioBatchesPerPhase -eq 1)
+                {
+                    "MiniSet"
+                }
+                else
+                {
+                    "Full"
+                }
+            }
+            else
+            {
+                "Full"
+            }
+        }
     $savedWorkloadMode =
         if ($savedPropertyNames -contains "WorkloadMode" -and
             -not [string]::IsNullOrWhiteSpace([string]$saved.WorkloadMode))
@@ -2525,6 +2590,7 @@ function Assert-ScenarioResumeParameters
     $stringChecks = @(
         [ordered]@{ Name = "WorkloadMode"; Saved = $savedWorkloadMode; Requested = $WorkloadMode; CaseSensitive = $false }
         [ordered]@{ Name = "ScenarioCommand"; Saved = $savedScenarioCommand; Requested = $ScenarioCommand; CaseSensitive = $false }
+        [ordered]@{ Name = "ScenarioSetMode"; Saved = $savedScenarioSetMode; Requested = $ScenarioSetMode; CaseSensitive = $false }
         [ordered]@{ Name = "ObjectPrefix"; Saved = [string]$saved.ObjectPrefix; Requested = $ObjectPrefix; CaseSensitive = $true }
         [ordered]@{ Name = "Organization"; Saved = [string]$saved.Organization; Requested = $Organization; CaseSensitive = $false }
         [ordered]@{ Name = "Side"; Saved = [string]$saved.Side; Requested = $Side; CaseSensitive = $false }
@@ -2634,7 +2700,8 @@ function Initialize-RunDirectory
     $parameters = [ordered]@{
         WorkloadMode = $WorkloadMode
         ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
-        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { (Get-ScenarioCommandDefinition).EstimatedMinutes } else { $null }
+        ScenarioSetMode = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioSetMode } else { $null }
+        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioEstimatedMinutes } else { $null }
         DurationHours = $DurationHours
         OperationsPerSecond = $OperationsPerSecond
         InitialRecipientCount = $InitialRecipientCount
@@ -4779,7 +4846,8 @@ function Write-RunSummary
         FinishedUtc = $FinishedUtc.ToString("o")
         DurationHours = [math]::Round(($FinishedUtc - $StartedUtc).TotalHours, 4)
         ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
-        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { (Get-ScenarioCommandDefinition).EstimatedMinutes } else { $null }
+        ScenarioSetMode = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioSetMode } else { $null }
+        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioEstimatedMinutes } else { $null }
         ScenarioBatchTotal = if ($WorkloadMode -eq "ScenarioTest") { @((Get-ScenarioCommandDefinition).PhaseNames).Count * $script:ScenarioBatchesPerPhase } else { $null }
         RequestedOperationsPerSecond = $OperationsPerSecond
         ActualOperationsPerSecond = [math]::Round($script:Counters.OperationsSucceeded / $elapsedSeconds, 4)
@@ -6789,6 +6857,8 @@ function Get-ScenarioPhaseDefinitions
 
 function Get-ScenarioQualificationFingerprint
 {
+    param([switch] $LegacyWithoutScenarioSetMode)
+
     $phases = @(Get-ScenarioPhaseDefinitions)
     $phaseShape = @(
         foreach ($phase in $phases)
@@ -6806,21 +6876,25 @@ function Get-ScenarioQualificationFingerprint
         PlanVersion = $script:ScenarioPlanVersion
         BatchesPerPhase = $script:ScenarioBatchesPerPhase
         ScenarioCommand = $ScenarioCommand.ToUpperInvariant()
-        RandomSeed = $RandomSeed
-        MachineName = ([string]$env:COMPUTERNAME).ToUpperInvariant()
-        ForestFqdn = ([string]$script:ForestFqdn).ToUpperInvariant()
-        TenantId = $script:TenantId.ToString("D")
-        Organization = ([string]$Organization).ToUpperInvariant()
-        Side = ([string]$Side).ToUpperInvariant()
-        ObjectStoreDestination = ([string]$ObjectStoreDestination).ToUpperInvariant()
-        ObjectPrefix = $ObjectPrefix
-        WhatIfTraffic = [bool]$WhatIfTraffic
-        CompareSetupScript = ([string]$CompareSetupScript).ToUpperInvariant()
-        ScenarioRuntimeDependencyRoot = ([string]$ScenarioRuntimeDependencyRoot).ToUpperInvariant()
-        UserObjects = $script:ScenarioCounts.N_User
-        GroupObjects = $script:ScenarioCounts.N_Groups
-        Phases = $phaseShape
     }
+    if (-not $LegacyWithoutScenarioSetMode)
+    {
+        $fingerprintInput.Add("ScenarioSetMode", $ScenarioSetMode.ToUpperInvariant())
+    }
+    $fingerprintInput.Add("RandomSeed", $RandomSeed)
+    $fingerprintInput.Add("MachineName", ([string]$env:COMPUTERNAME).ToUpperInvariant())
+    $fingerprintInput.Add("ForestFqdn", ([string]$script:ForestFqdn).ToUpperInvariant())
+    $fingerprintInput.Add("TenantId", $script:TenantId.ToString("D"))
+    $fingerprintInput.Add("Organization", ([string]$Organization).ToUpperInvariant())
+    $fingerprintInput.Add("Side", ([string]$Side).ToUpperInvariant())
+    $fingerprintInput.Add("ObjectStoreDestination", ([string]$ObjectStoreDestination).ToUpperInvariant())
+    $fingerprintInput.Add("ObjectPrefix", $ObjectPrefix)
+    $fingerprintInput.Add("WhatIfTraffic", [bool]$WhatIfTraffic)
+    $fingerprintInput.Add("CompareSetupScript", ([string]$CompareSetupScript).ToUpperInvariant())
+    $fingerprintInput.Add("ScenarioRuntimeDependencyRoot", ([string]$ScenarioRuntimeDependencyRoot).ToUpperInvariant())
+    $fingerprintInput.Add("UserObjects", $script:ScenarioCounts.N_User)
+    $fingerprintInput.Add("GroupObjects", $script:ScenarioCounts.N_Groups)
+    $fingerprintInput.Add("Phases", $phaseShape)
     $bytes = [Text.Encoding]::UTF8.GetBytes(
         ($fingerprintInput | ConvertTo-Json -Depth 8 -Compress))
     $hashAlgorithm = [Security.Cryptography.SHA256]::Create()
@@ -7112,6 +7186,7 @@ function Test-ScenarioDeterministicPlanQualification
         PlanVersion = $script:ScenarioPlanVersion
         BatchesPerPhase = $script:ScenarioBatchesPerPhase
         ScenarioCommand = $ScenarioCommand
+        ScenarioSetMode = $ScenarioSetMode
         RandomSeed = $RandomSeed
         UserObjects = $script:ScenarioCounts.N_User
         GroupObjects = $script:ScenarioCounts.N_Groups
@@ -7209,6 +7284,24 @@ function Get-ScenarioQualificationStatus
     {
         $mismatches.Add("scenario command")
     }
+    $qualificationScenarioSetMode =
+        if ($propertyNames -contains "ScenarioSetMode" -and
+            -not [string]::IsNullOrWhiteSpace([string]$qualification.ScenarioSetMode))
+        {
+            [string]$qualification.ScenarioSetMode
+        }
+        elseif ([int]$qualification.BatchesPerPhase -eq 1)
+        {
+            "MiniSet"
+        }
+        else
+        {
+            "Full"
+        }
+    if (-not [string]::Equals($qualificationScenarioSetMode, $ScenarioSetMode, [StringComparison]::OrdinalIgnoreCase))
+    {
+        $mismatches.Add("scenario set mode")
+    }
     if ([int]$qualification.RandomSeed -ne $RandomSeed)
     {
         $mismatches.Add("random seed")
@@ -7222,9 +7315,18 @@ function Get-ScenarioQualificationStatus
     {
         $mismatches.Add("phase selection")
     }
+    $expectedQualificationFingerprint =
+        if ($propertyNames -contains "ScenarioSetMode")
+        {
+            Get-ScenarioQualificationFingerprint
+        }
+        else
+        {
+            Get-ScenarioQualificationFingerprint -LegacyWithoutScenarioSetMode
+        }
     if (-not [string]::Equals(
         [string]$qualification.QualificationFingerprint,
-        (Get-ScenarioQualificationFingerprint),
+        $expectedQualificationFingerprint,
         [StringComparison]::OrdinalIgnoreCase))
     {
         $mismatches.Add("qualification fingerprint")
@@ -9166,7 +9268,8 @@ function Initialize-ScenarioPreflight
     Save-ScenarioTargetContext
     Write-RunEvent -Level "Success" -Message "ScenarioTest preflight passed." -Data @{
         ScenarioCommand = $ScenarioCommand
-        EstimatedMinutes = (Get-ScenarioCommandDefinition).EstimatedMinutes
+        ScenarioSetMode = $ScenarioSetMode
+        EstimatedMinutes = Get-ScenarioEstimatedMinutes
         PhaseCount = @((Get-ScenarioCommandDefinition).PhaseNames).Count
         BatchCount = @((Get-ScenarioCommandDefinition).PhaseNames).Count * $script:ScenarioBatchesPerPhase
         AttributeCount = $allNames.Count
@@ -9186,15 +9289,16 @@ try
         $commandDefinition = Get-ScenarioCommandDefinition
         Write-RunEvent -Level "Information" -Message "Scenario command '$ScenarioCommand' selected." -Data @{
             ScenarioCommand = $ScenarioCommand
+            ScenarioSetMode = $ScenarioSetMode
             PhaseNames = @($commandDefinition.PhaseNames)
-            EstimatedMinutes = [int]$commandDefinition.EstimatedMinutes
-            EstimatedDuration = if ([int]$commandDefinition.EstimatedMinutes -ge 60)
+            EstimatedMinutes = Get-ScenarioEstimatedMinutes
+            EstimatedDuration = if ((Get-ScenarioEstimatedMinutes) -ge 60)
             {
-                "{0:0.##} hours" -f ([int]$commandDefinition.EstimatedMinutes / 60.0)
+                "{0:0.##} hours" -f ((Get-ScenarioEstimatedMinutes) / 60.0)
             }
             else
             {
-                "$([int]$commandDefinition.EstimatedMinutes) minutes"
+                "$(Get-ScenarioEstimatedMinutes) minutes"
             }
             BatchCount = @($commandDefinition.PhaseNames).Count * $script:ScenarioBatchesPerPhase
             UserObjects = $script:ScenarioCounts.N_User

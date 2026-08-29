@@ -58,9 +58,17 @@ The harness supports these command subsets:
 - `Group-Properties-Deletion`: Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion.
 - `RunAll`: all 12 phases in canonical order.
 
-Each subset command has four batches per selected phase, for 12 batches.
-`RunAll` has 48 batches. Persist the command name in the checkpoint and reject
-a resume requested with a different command.
+The scenario set mode controls batches per selected phase:
+
+- `Full` is the default and runs batch 0 plus repetitions 1-3: four batches per
+  phase, 12 for a subset command, and 48 for `RunAll`.
+- `MiniSet` runs only batch 0: one batch per phase, 3 for a subset command, and
+  12 for `RunAll`.
+
+Persist the command and set mode in the checkpoint and reject a resume
+requested with a different command or mode. Mini-set mode preserves the full
+batch-0 `MUTATE_ALL -> WAIT_15_SECONDS -> COMPARE_ALL` barrier and aggregated
+failure behavior; it only omits repetitions 1-3.
 
 1. Use a logged random seed so every run can be reproduced.
 2. Shuffle object order independently for each phase and repetition.
@@ -120,8 +128,9 @@ a resume requested with a different command.
 17. Combine compatible selected attributes into bounded LDAP Modify operations.
     Enforce documented ADWS/LDAP attribute-count and encoded-payload limits;
     split before a request reaches either limit and log why it was split.
-18. Each phase consists of one initial one-property-per-object batch followed
-    by three variable-width repetitions, for four batches per phase.
+18. Each `Full` phase consists of one initial one-property-per-object batch
+    followed by three variable-width repetitions. Each `MiniSet` phase consists
+    only of the initial batch.
 
 ## Coverage-Aware Initial Batch
 
@@ -160,8 +169,8 @@ Link-property, Mixed, Upsert, and Deletion scenario:
 2. Do not start comparison until the mutation step reaches its barrier.
 3. Do not start the next batch/repetition until the current comparison step
    passes.
-4. Do not start the next phase until all four batches of the current phase
-   pass.
+4. Do not start the next phase until every batch configured for the selected
+   set mode passes.
 5. If the current step fails, preserve its exact checkpoint and resume inside
    that step after the defect is fixed. Never skip ahead to another batch or
    phase, and never replay already completed objects.
@@ -188,8 +197,9 @@ Run the 12 phases in exactly this order:
 12. Mixed Group Deletion
 
 All upsert phases, including mixed upserts, must complete before any deletion
-phase starts. Each phase has exactly four batches: the initial coverage batch
-and repetitions 1, 2, and 3, for 48 batches total.
+phase starts. `Full` runs the initial coverage batch and repetitions 1, 2, and
+3 for 48 batches total. `MiniSet` runs only the initial coverage batch for 12
+batches total.
 
 Phase transitions reuse the existing 235 User recipients or 267 Group
 recipients from the run ledger. Do not recreate, replace, or renumber objects
@@ -218,8 +228,9 @@ scenario checkpoint.
 
 Qualification must:
 
-1. Materialize every phase, all four batches, every randomized object position,
-   every selected property, and every generated value for the requested seed.
+1. Materialize every phase, every batch configured for the selected set mode,
+   every randomized object position, every selected property, and every
+   generated value for the requested seed.
 2. Validate all values against LDAP schema syntax, single/multivalue shape,
    `rangeLower`, `rangeUpper`, enum/domain restrictions, XML serialization
    contracts, GUID/SID/binary formats, and property-specific invariants.

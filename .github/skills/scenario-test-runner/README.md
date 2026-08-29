@@ -12,7 +12,7 @@ advanced use.
 
 Users can invoke the skill with one of these exact command names:
 
-| Command | Scenarios | Fresh population | Estimate | Batches |
+| Command | Scenarios | Fresh population | Full estimate | Full batches |
 | --- | --- | ---: | ---: | ---: |
 | `User-Upsert` | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert | 235 contacts | about 1 hour | 12 |
 | `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 267 groups | about 75 minutes | 12 |
@@ -20,7 +20,28 @@ Users can invoke the skill with one of these exact command names:
 | `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 267 groups | about 90 minutes | 12 |
 | `RunAll` | All 12 scenarios in canonical order | 235 contacts and 267 groups | about 5 hours | 48 |
 
-Each scenario has four batches:
+## Set modes
+
+Every command supports:
+
+- `--full` — four batches per phase; this is the default.
+- `--miniSet` — only batch 0 per phase; repetitions 1-3 are skipped.
+
+Examples:
+
+```text
+User-Upsert
+User-Upsert --full
+User-Upsert --miniSet
+RunAll --miniSet
+```
+
+| Mode | Subset command | `RunAll` |
+| --- | ---: | ---: |
+| `--full` or omitted | 12 batches | 48 batches |
+| `--miniSet` | 3 batches | 12 batches |
+
+Full mode uses four batches:
 
 1. Batch 0 mutates one property on every object.
 2. Batches 1-3 use deterministic variable-width property selections.
@@ -31,6 +52,10 @@ Each scenario has four batches:
 Deletion commands first prepare missing values for every object, compare all
 seeded baselines together, and only then start deletion mutations.
 
+Mini-set mode retains the complete batch-0 mutation barrier, sync wait,
+comparison, and aggregated failure behavior. It changes only the number of
+batches; it does not weaken batch-0 validation.
+
 ## PowerShell invocation
 
 Run the harness from an elevated Windows PowerShell 5.1 Exchange environment
@@ -40,6 +65,7 @@ on the TDS machine:
 .\Invoke-DirectoryObjectStoreLongevity.ps1 `
     -WorkloadMode ScenarioTest `
     -ScenarioCommand User-Upsert `
+    -ScenarioSetMode Full `
     -Organization contoso.com `
     -ObjectPrefix DOSUserUpsert `
     -Side A `
@@ -69,9 +95,11 @@ Before launching, the skill reports:
 
 ```text
 Command: <command>
+Set mode: <Full-or-MiniSet>
 Scenarios: <ordered scenario names>
 Estimated duration: <estimate>
 Population: <contacts/groups to create>
+Scenario batches: <mode-specific-total>
 Organization: <supplied-or-automatically-selected-organization>
 Object prefix: <automatically-generated-prefix>
 Monitoring: every 2 minutes for the first 10 traffic minutes, then every
@@ -81,6 +109,11 @@ Monitoring: every 2 minutes for the first 10 traffic minutes, then every
 The estimates describe expected scenario execution on a healthy TDS machine.
 Initial preflight, exhaustive qualification, environment repair, or a script
 repair can add time.
+
+Mini-set estimates are derived as one quarter of the full estimate, rounded
+up: 15 minutes for `User-Upsert`, 19 for `Group-Upsert`, 20 for
+`User-Properties-Deletion`, 23 for `Group-Properties-Deletion`, and 75 for
+`RunAll`.
 
 ## Prerequisites
 
@@ -155,8 +188,10 @@ A new command run performs:
 
 Qualification covers only the phases selected by `ScenarioCommand`:
 
-- subset command: 3 phases and 12 batches;
-- `RunAll`: 12 phases and 48 batches.
+- Full subset command: 3 phases and 12 batches;
+- Mini-set subset command: 3 phases and 3 batches;
+- Full `RunAll`: 12 phases and 48 batches;
+- Mini-set `RunAll`: 12 phases and 12 batches.
 
 Scenario traffic starts only after qualification reports zero defects.
 
@@ -232,12 +267,13 @@ diagnosis.
 
 ## Resume
 
-Always resume with the original workload and command:
+Always resume with the original workload, command, and set mode:
 
 ```powershell
 .\Invoke-DirectoryObjectStoreLongevity.ps1 `
     -WorkloadMode ScenarioTest `
     -ScenarioCommand User-Properties-Deletion `
+    -ScenarioSetMode <original-Full-or-MiniSet> `
     -ResumeRunDirectory C:\tds\ScenarioTest\Runs\<run-id> `
     -Organization contoso.com `
     -ObjectPrefix <original-prefix> `
@@ -245,13 +281,14 @@ Always resume with the original workload and command:
     -ObjectStoreDestination Test
 ```
 
-The checkpoint persists `WorkloadMode` and `ScenarioCommand`. A mismatched
-resume is rejected before state restoration or traffic.
+The checkpoint persists `WorkloadMode`, `ScenarioCommand`, and
+`ScenarioSetMode`. A mismatched resume is rejected before state restoration or
+traffic.
 
 Resume also requires the original organization, side, Object Store
 destination, object prefix, random seed, simulation mode, comparison setup,
-and runtime dependency path. This prevents a checkpoint from one tenant or
-execution mode being applied to another.
+and runtime dependency path. This prevents a checkpoint from one set mode,
+tenant, or execution mode being applied to another.
 
 Compatible resumes restore:
 
@@ -290,7 +327,7 @@ batch records.
 At terminal success, report:
 
 - every phase total;
-- all four batch durations;
+- every configured batch duration;
 - upsert/deletion totals;
 - total scenario-batch time;
 - full wall-clock time;

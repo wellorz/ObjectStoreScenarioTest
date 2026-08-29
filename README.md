@@ -20,6 +20,20 @@ does not contain duplicate harness, status, contract, or skill files.
 | `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | about 90 minutes |
 | `RunAll` | All 12 scenarios | about 5 hours |
 
+Commands default to `--full`, which runs all four batches per phase. Add
+`--miniSet` to run only the initial batch for each phase:
+
+```text
+User-Upsert --miniSet
+RunAll --miniSet
+```
+
+Use `--full` explicitly when desired:
+
+```text
+Group-Upsert --full
+```
+
 ## Install
 
 Clone the repository:

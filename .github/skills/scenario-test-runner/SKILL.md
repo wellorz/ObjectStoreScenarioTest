@@ -13,7 +13,7 @@ Execute `ScenarioTest.md` and `Invoke-DirectoryObjectStoreLongevity.ps1` as an o
 Treat any of these exact, case-insensitive command names as a request to start
 the corresponding ScenarioTest subset:
 
-| Command | Scenarios | Population | Estimate | Batches |
+| Command | Scenarios | Population | Full estimate | Full batches |
 | --- | --- | ---: | ---: | ---: |
 | `User-Upsert` | Pure User Recipient Upsert; Pure User Link Upsert; Mixed User Upsert | 235 contacts | about 1 hour | 12 |
 | `Group-Upsert` | Pure Group Recipient Upsert; Pure Group Link Upsert; Mixed Group Upsert | 267 groups | about 75 minutes | 12 |
@@ -21,12 +21,36 @@ the corresponding ScenarioTest subset:
 | `Group-Properties-Deletion` | Pure Group Recipient Deletion; Pure Group Link Deletion; Mixed Group Deletion | 267 groups | about 90 minutes | 12 |
 | `RunAll` | All 12 scenarios in canonical order | 235 contacts and 267 groups | about 5 hours | 48 |
 
+Each command accepts one optional mode modifier:
+
+- `--full`: run batch 0 plus repetitions 1, 2, and 3 for every phase.
+- `--miniSet`: run only batch 0 for every phase; skip repetitions 1-3.
+
+Use `--full` when no modifier is supplied. Do not ask the user to choose a
+mode. Reject a request containing both modifiers.
+
+Examples:
+
+```text
+User-Upsert
+User-Upsert --full
+User-Upsert --miniSet
+RunAll --miniSet
+```
+
+Map the modifier to the harness:
+
+```powershell
+$ScenarioSetMode = if ($UserRequestedMiniSet) { "MiniSet" } else { "Full" }
+```
+
 Invoke the harness with the matching `-ScenarioCommand`:
 
 ```powershell
 .\Invoke-DirectoryObjectStoreLongevity.ps1 `
     -WorkloadMode ScenarioTest `
     -ScenarioCommand User-Upsert `
+    -ScenarioSetMode $ScenarioSetMode `
     -Organization $Organization `
     -ObjectPrefix $ObjectPrefix `
     -Side A `
@@ -113,15 +137,18 @@ use as a tenant.
 Likewise, use an explicitly supplied TDS machine or the active TDS machine.
 Ask only when neither is available or the target is ambiguous. Do not ask for
 confirmation of the selected command, generated prefix, default side `A`,
-destination `Test`, random seed `1729`, or default reporting intervals.
+destination `Test`, random seed `1729`, default `Full` set mode, or default
+reporting intervals.
 
 Before starting, tell the user:
 
 ```text
 Command: <command>
+Set mode: <Full-or-MiniSet>
 Scenarios: <ordered scenario names>
 Estimated duration: <estimate>
 Population: <contacts/groups to create>
+Scenario batches: <completed>/<mode-specific-total>
 Organization: <supplied-or-discovered-organization>
 Object prefix: <automatically-generated-prefix>
 Monitoring: every 2 minutes for the first 10 traffic minutes, then every
@@ -133,6 +160,16 @@ instead. If they specify separate initial and steady-state intervals, use both.
 After any failure, repair, resume, or material regression, return to the
 requested initial interval; otherwise return to the default two-minute
 interval.
+
+Mode-specific totals:
+
+- subset command with `Full`: 12 batches;
+- subset command with `MiniSet`: 3 batches;
+- `RunAll --full` or plain `RunAll`: 48 batches;
+- `RunAll --miniSet`: 12 batches.
+
+Mini-set estimates are one quarter of the corresponding full estimate, rounded
+up. They remain estimates; environment preflight and repair can add time.
 
 ## Discoverability and helper skills
 
@@ -209,6 +246,7 @@ small state record in the agent's session-artifact area. Track at least:
 
 - `runId`
 - `scenarioCommand`
+- `scenarioSetMode`
 - `estimatedMinutes`
 - `machineName`
 - `machineIp`
@@ -256,9 +294,10 @@ missing session state from TDS artifacts when necessary. Never attach to a PID
 or run merely because it is the newest one.
 
 Before modifying any resume artifact, require the original workload, scenario
-command, organization, side, Object Store destination, object prefix, random
-seed, WhatIf mode, comparison setup, and runtime dependency path. Reject a
-cross-tenant, cross-destination, or simulation-to-live resume.
+command, scenario set mode, organization, side, Object Store destination,
+object prefix, random seed, WhatIf mode, comparison setup, and runtime
+dependency path. Reject a cross-mode, cross-tenant, cross-destination, or
+simulation-to-live resume.
 
 ## 1. Full preflight
 
@@ -275,11 +314,11 @@ Run the complete preflight before starting traffic when any of these is true:
 
 1. Before any run, verify that the harness implements the current scenario
    contract:
-   - `ScenarioBatchesPerPhase=4`;
+   - `ScenarioBatchesPerPhase=4` for `Full` or `1` for `MiniSet`;
    - a hard initial-batch
      `MUTATE_ALL -> WAIT_15_SECONDS -> COMPARE_ALL` barrier;
    - initial-batch-wide comparison and failure aggregation;
-   - fail-fast behavior for repetitions 1, 2, and 3;
+   - fail-fast behavior for repetitions 1, 2, and 3 in `Full` mode;
    - exhaustive harness qualification with a machine-readable zero-defect
      report.
    If any item is missing, do not run or resume ScenarioTest. Update and
@@ -341,9 +380,10 @@ For every phase:
 4. For the initial batch only, continue after individual mutation and
    comparison failures so every object is checked. Aggregate all initial-batch
    failures and pause once after the complete report.
-5. Each of repetitions 1, 2, and 3 uses the deterministic variable-width
-   property set and preserves fail-fast behavior.
-6. During repetitions 1–3, pause immediately on the first mutation failure,
+5. In `Full` mode, each of repetitions 1, 2, and 3 uses the deterministic
+   variable-width property set and preserves fail-fast behavior. `MiniSet`
+   ends the phase after batch 0 passes.
+6. During enabled repetitions 1–3, pause immediately on the first mutation failure,
    cookie timeout, comparison error, compare timeout, or terminal non-`DataSame`
    result. Do not continue merely to aggregate additional failures.
 7. Never start a later batch or phase after either an aggregated initial-batch
@@ -355,8 +395,8 @@ new step, prove from the checkpoint that:
 - the previous mutation barrier completed;
 - its comparison barrier completed successfully;
 - the previous batch is recorded as passed;
-- when crossing a phase boundary, all four batches of the previous phase are
-  recorded as passed.
+- when crossing a phase boundary, every batch configured for the selected set
+  mode is recorded as passed.
 
 After a repair, resume the failed step at its saved object position. Do not
 advance to a sibling scenario, later batch, or later phase, and do not repeat
