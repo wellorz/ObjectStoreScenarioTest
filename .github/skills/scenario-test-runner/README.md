@@ -12,13 +12,28 @@ advanced use.
 
 Users can invoke the skill with one of these exact command names:
 
-| Command | Scenarios | Fresh population | `--miniSet` | `--full` |
-| --- | --- | ---: | ---: | ---: |
-| `User-Upsert` | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert | 235 contacts | about 5 minutes | about 60 minutes |
-| `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 267 groups | about 5 minutes | about 75 minutes |
-| `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | 235 contacts | about 10 minutes | about 80 minutes |
-| `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 267 groups | about 10 minutes | about 95 minutes |
-| `RunAll` | All 12 scenarios in canonical order | 235 contacts and 267 groups | about 25 minutes | about 305 minutes |
+| Command | Scenarios | `--miniSet` scenario | `--full` scenario |
+| --- | --- | ---: | ---: |
+| `User-Upsert` | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert | 5 minutes | 60 minutes |
+| `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 5 minutes | 75 minutes |
+| `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | 10 minutes | 80 minutes |
+| `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 10 minutes | 95 minutes |
+| `RunAll` | All 12 scenarios in canonical order | 25 minutes | 305 minutes |
+
+Mandatory overhead estimates:
+
+- preflight and qualification: measured 7m 21s, estimated 10 minutes on every
+  new command run;
+- population creation and validation: measured 11m 42s, estimated 15 minutes
+  only when no compatible shared population exists.
+
+| Command | Mini reused | Mini first | Full reused | Full first |
+| --- | ---: | ---: | ---: | ---: |
+| `User-Upsert` | 15 min | 30 min | 70 min | 85 min |
+| `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
+| `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
+| `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
+| `RunAll` | 35 min | 50 min | 315 min | 330 min |
 
 ## Set modes
 
@@ -66,6 +81,7 @@ on the TDS machine:
     -WorkloadMode ScenarioTest `
     -ScenarioCommand User-Upsert `
     -ScenarioSetMode Full `
+    -PopulationSourceRunDirectory C:\tds\ScenarioTest\Runs\<prior-run-id> `
     -Organization contoso.com `
     -ObjectPrefix DOSUserUpsert `
     -Side A `
@@ -74,6 +90,7 @@ on the TDS machine:
     -ScenarioRuntimeDependencyRoot C:\tds\RuntimeDependencies\net472
 ```
 
+Omit `-PopulationSourceRunDirectory` for the first population on a TDS.
 Replace `User-Upsert` with any command from the table. When Copilot runs the
 skill, it automatically generates a unique `ObjectPrefix` from the command,
 UTC timestamp, and a six-character GUID suffix, for example:
@@ -98,7 +115,8 @@ Command: <command>
 Set mode: <Full-or-MiniSet>
 Scenarios: <ordered scenario names>
 Estimated duration: <estimate>
-Population: <contacts/groups to create>
+Time breakdown: preflight <10m>; population <0m reused-or-15m new>; scenario <estimate>
+Population: <reused from run-id-or-235 contacts and 267 groups to create>
 Scenario batches: <mode-specific-total>
 Organization: <supplied-or-automatically-selected-organization>
 Object prefix: <automatically-generated-prefix>
@@ -106,19 +124,26 @@ Monitoring: every 2 minutes for the first 10 traffic minutes, then every
 5 minutes while healthy.
 ```
 
-The estimates describe expected scenario execution on a healthy TDS machine.
-Initial preflight, exhaustive qualification, environment repair, or a script
-repair can add time.
+The estimate includes the mandatory 10-minute preflight estimate and includes
+the 15-minute population estimate only when a compatible shared population is
+not reused. Environment or script repair can add time.
 
-The estimates use the measured timings from the completed 48-batch run.
-Mini-set sums the three or twelve batch-0 durations; full sums all applicable
-scenario totals. Each value is rounded upward to the next five minutes:
+The scenario portions use the measured timings from the completed 48-batch
+run. Mini-set sums the three or twelve batch-0 durations; full sums all
+applicable scenario totals. Each stage is rounded upward to the next five
+minutes:
 
 - `User-Upsert`: 5 minutes mini-set, 60 minutes full;
 - `Group-Upsert`: 5 minutes mini-set, 75 minutes full;
 - `User-Properties-Deletion`: 10 minutes mini-set, 80 minutes full;
 - `Group-Properties-Deletion`: 10 minutes mini-set, 95 minutes full;
 - `RunAll`: 25 minutes mini-set, 305 minutes full.
+
+Every first command on a TDS creates the complete shared population of 235
+contacts and 267 groups. Later compatible commands reuse that population by
+passing the prior successful run directory through
+`-PopulationSourceRunDirectory`. Only the population ledger is imported; each
+command gets a new run directory, checkpoint, phase plan, counters, and logs.
 
 ## Prerequisites
 
@@ -270,6 +295,21 @@ Script defects may be repaired and resumed without repeating completed
 objects. Product, consistency, and environment failures remain paused for
 diagnosis.
 
+If diagnosis proves a terminal per-object AD/Object Store inconsistency, the
+harness records the affected GUIDs and changes the retry behavior:
+
+- preserve the old objects in a `retired-population-pNN-gNN.json` artifact;
+- create a complete replacement set for that phase's entity kind—235 contacts
+  for a User phase or 267 groups for a Group phase;
+- restart that phase from batch 0 with collision-safe generation names;
+- preserve completed earlier phases;
+- checkpoint every successful replacement creation and keep the replacement
+  pending until every new GUID passes consistency validation.
+
+Timeouts, skipped/incomplete compares, read failures, mutation failures, and
+harness defects do not trigger population replacement because they do not
+prove an object-data inconsistency.
+
 ## Resume
 
 Always resume with the original workload, command, and set mode:
@@ -279,6 +319,7 @@ Always resume with the original workload, command, and set mode:
     -WorkloadMode ScenarioTest `
     -ScenarioCommand User-Properties-Deletion `
     -ScenarioSetMode <original-Full-or-MiniSet> `
+    -PopulationSourceRunDirectory <original-source-run-if-reused> `
     -ResumeRunDirectory C:\tds\ScenarioTest\Runs\<run-id> `
     -Organization contoso.com `
     -ObjectPrefix <original-prefix> `
@@ -286,9 +327,11 @@ Always resume with the original workload, command, and set mode:
     -ObjectStoreDestination Test
 ```
 
-The checkpoint persists `WorkloadMode`, `ScenarioCommand`, and
-`ScenarioSetMode`. A mismatched resume is rejected before state restoration or
-traffic.
+The checkpoint persists `WorkloadMode`, `ScenarioCommand`,
+`ScenarioSetMode`, and the population source. A mismatched resume is rejected
+before state restoration or traffic. Omit
+`-PopulationSourceRunDirectory` only when the original run created its own
+population.
 
 Resume also requires the original organization, side, Object Store
 destination, object prefix, random seed, simulation mode, comparison setup,

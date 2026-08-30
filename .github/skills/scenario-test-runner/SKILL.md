@@ -13,13 +13,30 @@ Execute `ScenarioTest.md` and `Invoke-DirectoryObjectStoreLongevity.ps1` as an o
 Treat any of these exact, case-insensitive command names as a request to start
 the corresponding ScenarioTest subset:
 
-| Command | Scenarios | Population | `--miniSet` | `--full` |
-| --- | --- | ---: | ---: | ---: |
-| `User-Upsert` | Pure User Recipient Upsert; Pure User Link Upsert; Mixed User Upsert | 235 contacts | about 5 minutes | about 60 minutes |
-| `Group-Upsert` | Pure Group Recipient Upsert; Pure Group Link Upsert; Mixed Group Upsert | 267 groups | about 5 minutes | about 75 minutes |
-| `User-Properties-Deletion` | Pure User Recipient Deletion; Pure User Link Deletion; Mixed User Deletion | 235 contacts | about 10 minutes | about 80 minutes |
-| `Group-Properties-Deletion` | Pure Group Recipient Deletion; Pure Group Link Deletion; Mixed Group Deletion | 267 groups | about 10 minutes | about 95 minutes |
-| `RunAll` | All 12 scenarios in canonical order | 235 contacts and 267 groups | about 25 minutes | about 305 minutes |
+| Command | Scenarios | `--miniSet` scenario | `--full` scenario |
+| --- | --- | ---: | ---: |
+| `User-Upsert` | Pure User Recipient Upsert; Pure User Link Upsert; Mixed User Upsert | 5 minutes | 60 minutes |
+| `Group-Upsert` | Pure Group Recipient Upsert; Pure Group Link Upsert; Mixed Group Upsert | 5 minutes | 75 minutes |
+| `User-Properties-Deletion` | Pure User Recipient Deletion; Pure User Link Deletion; Mixed User Deletion | 10 minutes | 80 minutes |
+| `Group-Properties-Deletion` | Pure Group Recipient Deletion; Pure Group Link Deletion; Mixed Group Deletion | 10 minutes | 95 minutes |
+| `RunAll` | All 12 scenarios in canonical order | 25 minutes | 305 minutes |
+
+Add these mandatory stage estimates:
+
+| Stage | Measured | Estimate | Applied |
+| --- | ---: | ---: | --- |
+| Preflight and qualification | 7m 21s | 10 minutes | Every new command run |
+| Population creation and validation | 11m 42s | 15 minutes | Only when no compatible shared population exists |
+
+Total estimates:
+
+| Command | Mini-set, reused population | Mini-set, first population | Full, reused population | Full, first population |
+| --- | ---: | ---: | ---: | ---: |
+| `User-Upsert` | 15 min | 30 min | 70 min | 85 min |
+| `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
+| `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
+| `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
+| `RunAll` | 35 min | 50 min | 315 min | 330 min |
 
 Each command accepts one optional mode modifier:
 
@@ -57,11 +74,115 @@ Invoke the harness with the matching `-ScenarioCommand`:
     -ObjectStoreDestination Test
 ```
 
+Add `-PopulationSourceRunDirectory <prior-run-directory>` when reusing a
+compatible shared population.
+
 ## Automatic input resolution
 
-Do not ask the user to choose an object prefix. Generate a new prefix for every
-fresh run using the command code, UTC timestamp, and a six-character GUID
-suffix:
+Resolve automatic inputs in this order:
+
+1. Resolve the explicit or active TDS machine.
+2. Resolve the Exchange organization using the organization procedure below.
+3. Search for a compatible shared population using that organization.
+4. Reuse the source prefix when a population is found; otherwise generate one.
+
+Do not ask the user to choose an object prefix. After resolving the
+organization, look for a compatible shared population under the TDS `Runs`
+directory. A candidate must:
+
+- have `summary.json` status `Passed`;
+- have `parameters.json` and `checkpoint.json`;
+- declare `SharedPopulationVersion=1`;
+- match organization, side, Object Store destination, and WhatIf mode;
+- not have `CleanupOnSuccess=true`;
+- contain at least 235 contacts and 267 groups in its checkpoint.
+
+Choose the newest compatible candidate. Reuse its `ObjectPrefix` and pass its
+run directory as `-PopulationSourceRunDirectory`. Do not import its phase
+state, counters, pending validations, or failures.
+
+Use bounded snapshot reads to select it:
+
+```powershell
+$populationCandidates = @(
+    Get-ChildItem -LiteralPath $OutputRoot -Directory -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending |
+        ForEach-Object {
+            try
+            {
+                $parametersPath = Join-Path $_.FullName "parameters.json"
+                $checkpointPath = Join-Path $_.FullName "checkpoint.json"
+                $summaryPath = Join-Path $_.FullName "summary.json"
+                if (-not (Test-Path $parametersPath) -or
+                    -not (Test-Path $checkpointPath) -or
+                    -not (Test-Path $summaryPath))
+                {
+                    return
+                }
+                if ((Get-Item $parametersPath).Length -gt 4MB -or
+                    (Get-Item $checkpointPath).Length -gt 128MB -or
+                    (Get-Item $summaryPath).Length -gt 16MB)
+                {
+                    return
+                }
+                $parameters = Get-Content $parametersPath -Raw | ConvertFrom-Json
+                $parameterNames = @($parameters.PSObject.Properties.Name)
+                $checkpoint = Get-Content $checkpointPath -Raw | ConvertFrom-Json
+                $summary = Get-Content $summaryPath -Raw | ConvertFrom-Json
+                if ([string]$summary.Status -ieq "Passed" -and
+                    [string]$parameters.WorkloadMode -ieq "ScenarioTest" -and
+                    $parameterNames -contains "SharedPopulationVersion" -and
+                    [int]$parameters.SharedPopulationVersion -eq 1 -and
+                    [string]$parameters.Organization -ieq $Organization -and
+                    [string]$parameters.Side -ieq $Side -and
+                    [string]$parameters.ObjectStoreDestination -ieq $ObjectStoreDestination -and
+                    [bool]$parameters.WhatIfTraffic -eq [bool]$WhatIfTraffic -and
+                    $parameterNames -contains "CleanupOnSuccess" -and
+                    -not [bool]$parameters.CleanupOnSuccess -and
+                    @($checkpoint.Contacts).Count -ge 235 -and
+                    @($checkpoint.Groups).Count -ge 267)
+                {
+                    [pscustomobject]@{
+                        RunDirectory = $_.FullName
+                        ObjectPrefix = [string]$parameters.ObjectPrefix
+                        FinishedUtc = [datetime]$summary.FinishedUtc
+                        ObjectGuids = @(
+                            @($checkpoint.Contacts) + @($checkpoint.Groups) |
+                                ForEach-Object { [guid]$_.Guid }
+                        )
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+) | Sort-Object FinishedUtc -Descending
+
+$populationCandidate = $null
+foreach ($candidate in $populationCandidates)
+{
+    $missingGuid = $candidate.ObjectGuids |
+        Where-Object {
+            $null -eq (Get-ADObject -Identity $_ -ErrorAction SilentlyContinue)
+        } |
+        Select-Object -First 1
+    if ($null -eq $missingGuid)
+    {
+        $populationCandidate = $candidate
+        break
+    }
+}
+
+if ($null -ne $populationCandidate)
+{
+    $PopulationSourceRunDirectory = $populationCandidate.RunDirectory
+    $ObjectPrefix = $populationCandidate.ObjectPrefix
+}
+```
+
+If no compatible population exists, generate a new prefix using the command
+code, UTC timestamp, and a six-character GUID suffix:
 
 ```powershell
 $commandCode = @{
@@ -74,9 +195,11 @@ $commandCode = @{
 $ObjectPrefix = "DOS$commandCode-$([datetime]::UtcNow.ToString('MMddHHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0, 6))"
 ```
 
-The generated value satisfies the harness's 3-32 character constraint. Report
-it in the start announcement and persist it in run state, but do not ask the
-user to approve or edit it unless they explicitly supplied a prefix.
+The generated value satisfies the harness's 3-32 character constraint. A new
+population always creates the complete shared pool of 235 contacts and 267
+groups, regardless of which command runs first. Report the prefix and whether
+the population is new or reused, but do not ask the user to approve or edit
+either choice.
 
 Resolve the organization without prompting when possible:
 
@@ -147,7 +270,8 @@ Command: <command>
 Set mode: <Full-or-MiniSet>
 Scenarios: <ordered scenario names>
 Estimated duration: <estimate>
-Population: <contacts/groups to create>
+Time breakdown: preflight <10m>; population <0m reused-or-15m new>; scenario <estimate>
+Population: <reused from run-id-or-235 contacts and 267 groups to create>
 Scenario batches: <completed>/<mode-specific-total>
 Organization: <supplied-or-discovered-organization>
 Object prefix: <automatically-generated-prefix>
@@ -168,10 +292,10 @@ Mode-specific totals:
 - `RunAll --full` or plain `RunAll`: 48 batches;
 - `RunAll --miniSet`: 12 batches.
 
-The estimates come from measured phase totals: mini-set uses the sum of batch
-0, while full uses the sum of all four batches. Each result is rounded upward
-to the next five minutes. Environment preflight, bootstrap, and repair can add
-time.
+The estimates come from measured stage timings and are rounded upward to the
+next five minutes. Preflight is mandatory for every new command. Population
+creation is added only when no compatible shared population exists. Repair can
+add unplanned time.
 
 ## Discoverability and helper skills
 
@@ -249,6 +373,9 @@ small state record in the agent's session-artifact area. Track at least:
 - `runId`
 - `scenarioCommand`
 - `scenarioSetMode`
+- `populationSourceRunDirectory`
+- `populationReused`
+- `populationImportCompleted`
 - `estimatedMinutes`
 - `machineName`
 - `machineIp`
@@ -270,6 +397,9 @@ small state record in the agent's session-artifact area. Track at least:
 - `lastKnownStatus`
 - `dataConsistencyStatus`
 - `dataConsistencyEvidence`
+- `dataInconsistentPopulationGuids`
+- `pendingPopulationReplacement`
+- `populationGeneration`
 - `failureClassification`
 - `failedObjects`
 - `scriptFixes`
@@ -296,10 +426,10 @@ missing session state from TDS artifacts when necessary. Never attach to a PID
 or run merely because it is the newest one.
 
 Before modifying any resume artifact, require the original workload, scenario
-command, scenario set mode, organization, side, Object Store destination,
-object prefix, random seed, WhatIf mode, comparison setup, and runtime
-dependency path. Reject a cross-mode, cross-tenant, cross-destination, or
-simulation-to-live resume.
+command, scenario set mode, population source, organization, side, Object
+Store destination, object prefix, random seed, WhatIf mode, comparison setup,
+and runtime dependency path. Reject a cross-mode, cross-population,
+cross-tenant, cross-destination, or simulation-to-live resume.
 
 ## 1. Full preflight
 
@@ -358,11 +488,15 @@ checkpoint, restore `scenario-target-context.clixml`, and resume at the saved
 object position. Rebuild the 21-query target context only when the cache is
 missing or its plan version, organization, or forest does not match.
 
-Restore the active batch's `scenario-plan-pNN-bNN.json` verbatim. For deletion,
-resume baseline preparation using `BaselinePreparedGuids`; do not treat a
-prepared or seeded GUID as a completed deletion. Require one aggregate
-seed-validation barrier before any deletion mutation begins. Never select
-`msExchCU` or `msExchOURoot` for deletion.
+For script, environment, mutation, or comparison-availability failures, restore
+the active batch's `scenario-plan-pNN-bNN.json` verbatim. For deletion, resume
+baseline preparation using `BaselinePreparedGuids`; do not treat a prepared or
+seeded GUID as a completed deletion. Require one aggregate seed-validation
+barrier before any deletion mutation begins. Never select `msExchCU` or
+`msExchOURoot` for deletion.
+
+For a proven terminal object-data inconsistency, use the separate population
+replacement behavior below instead of restoring the failed plan.
 
 Use `-ForceFullPreflightOnResume` only when direct evidence shows the new
 failure is related to preflight, environment, dependency, cookie,
@@ -372,8 +506,9 @@ comparison-runtime, configuration, or target-discovery state.
 
 For every phase:
 
-1. Reuse the existing ledger-owned User or Group population. Do not provision
-   phase-specific replacement objects.
+1. Reuse the existing ledger-owned User or Group population. The only
+   exception is a proven terminal data inconsistency, which replaces the
+   complete entity set for the affected phase before retry.
 2. Verify the previous phase completed successfully before reusing its objects.
    Any recipient or group with an unresolved mutation or comparison failure
    must not advance to another phase.
@@ -400,9 +535,43 @@ new step, prove from the checkpoint that:
 - when crossing a phase boundary, every batch configured for the selected set
   mode is recorded as passed.
 
-After a repair, resume the failed step at its saved object position. Do not
-advance to a sibling scenario, later batch, or later phase, and do not repeat
-objects already recorded in `CurrentBatchCompletedGuids`.
+After an ordinary repair, resume the failed step at its saved object position.
+Do not advance to a sibling scenario, later batch, or later phase, and do not
+repeat objects already recorded in `CurrentBatchCompletedGuids`.
+
+After a proven terminal data inconsistency:
+
+1. Record every affected object GUID in `DataInconsistentPopulation`.
+2. Preserve the old entity set in
+   `retired-population-pNN-gNN.json`; do not delete it, because it is diagnostic
+   evidence.
+3. If the failed phase is a User phase, replace all 235 contacts. If it is a
+   Group phase, replace all 267 groups.
+4. Increment `PopulationGeneration` so replacement names cannot collide with
+   the original deterministic names.
+5. Clear only the failed phase's current/later batch summaries, plans, pending
+   validations, and progress. Preserve completed earlier phases.
+6. Remove every retired distinguished name from cached link-target pools and
+   add the new User/Group set before retry.
+7. Restart the failed phase at batch 0 with the replacement set.
+8. Persist `PendingPopulationReplacement` until the complete replacement set
+   has been created and every replacement GUID has passed consistency
+   validation, so an interrupted replacement resumes idempotently.
+
+Only terminal object-specific mismatches qualify:
+
+- an active-object comparison returned a terminal result other than
+  `DataSame`; or
+- deletion validation proved `ObjectStillPresentInObjectStore`.
+
+Do not replace a population for cookie timeouts, incomplete/skipped compares,
+read failures, mutation failures, harness defects, or other infrastructure
+errors that did not prove a data mismatch.
+
+Validate only the active replacement GUID set while replacement is in
+progress. Preserve outstanding validations for the other entity kind. After
+the first replacement completes, process those validations and schedule a
+second replacement if they independently prove another data inconsistency.
 
 Progress reports must distinguish `mutation stage`, `15-second wait`, and
 `comparison stage`, including `objects attempted/total` and

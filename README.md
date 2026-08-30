@@ -12,13 +12,13 @@ does not contain duplicate harness, status, contract, or skill files.
 
 ## Commands
 
-| Command | Scenarios | `--miniSet` | `--full` |
-| --- | --- | ---: | ---: |
-| `User-Upsert` | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert | about 5 minutes | about 60 minutes |
-| `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | about 5 minutes | about 75 minutes |
-| `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | about 10 minutes | about 80 minutes |
-| `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | about 10 minutes | about 95 minutes |
-| `RunAll` | All 12 scenarios | about 25 minutes | about 305 minutes |
+| Command | Mini reused | Mini first | Full reused | Full first |
+| --- | ---: | ---: | ---: | ---: |
+| `User-Upsert` | 15 min | 30 min | 70 min | 85 min |
+| `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
+| `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
+| `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
+| `RunAll` | 35 min | 50 min | 315 min | 330 min |
 
 Commands default to `--full`, which runs all four batches per phase. Add
 `--miniSet` to run only the initial batch for each phase:
@@ -34,8 +34,10 @@ Use `--full` explicitly when desired:
 Group-Upsert --full
 ```
 
-Estimates are based on the measured batch timings from a completed full run and
-are rounded upward to the next five minutes.
+Every estimate includes a mandatory 10-minute preflight estimate. A first run
+also includes 15 minutes to create and validate the shared 235-contact and
+267-group population. Later compatible commands reuse it. All stage estimates
+are based on measured timings and rounded upward to the next five minutes.
 
 ## Install
 

@@ -75,6 +75,8 @@ param(
 
     [string] $ResumeRunDirectory,
 
+    [string] $PopulationSourceRunDirectory,
+
     [switch] $ConfigureEnvironment,
 
     [switch] $CleanupOnSuccess,
@@ -103,6 +105,14 @@ if ($WorkloadMode -ne "ScenarioTest" -and $PSBoundParameters.ContainsKey("Scenar
 {
     throw "-ScenarioSetMode is supported only with -WorkloadMode ScenarioTest."
 }
+if ($WorkloadMode -ne "ScenarioTest" -and $PSBoundParameters.ContainsKey("PopulationSourceRunDirectory"))
+{
+    throw "-PopulationSourceRunDirectory is supported only with -WorkloadMode ScenarioTest."
+}
+if ($CleanupOnSuccess -and -not [string]::IsNullOrWhiteSpace($PopulationSourceRunDirectory))
+{
+    throw "-CleanupOnSuccess cannot be used when reusing a shared ScenarioTest population."
+}
 
 if ([string]::IsNullOrWhiteSpace($OutputRoot))
 {
@@ -112,6 +122,11 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot))
 if ([string]::IsNullOrWhiteSpace($ScenarioRuntimeDependencyRoot))
 {
     $ScenarioRuntimeDependencyRoot = Join-Path $PSScriptRoot "RuntimeDependencies\net472"
+}
+if (-not [string]::IsNullOrWhiteSpace($PopulationSourceRunDirectory))
+{
+    $PopulationSourceRunDirectory =
+        (Resolve-Path -LiteralPath $PopulationSourceRunDirectory -ErrorAction Stop).Path
 }
 
 $script:RunId = $null
@@ -170,7 +185,22 @@ $script:ScenarioLogNextIndex = @{}
 $script:ScenarioTotalObjectWork = 0L
 $script:ScenarioCompletedObjectWork = 0L
 $script:ScenarioPlanVersion = 4
+$script:ScenarioSharedPopulationVersion = 1
+$script:LegacyCommandSpecificPopulation = $false
 $script:ScenarioBatchesPerPhase = if ($ScenarioSetMode -eq "MiniSet") { 1 } else { 4 }
+$script:ScenarioPreflightEstimatedMinutes = 10
+$script:ScenarioPopulationEstimatedMinutes =
+    if ([string]::IsNullOrWhiteSpace($PopulationSourceRunDirectory)) { 15 } else { 0 }
+$script:PopulationReused = $false
+$script:ResolvedPopulationSourceRunDirectory = $null
+$script:PopulationImportCompleted = $false
+$script:ScenarioPopulationIdentitiesValidated = $false
+$script:PopulationGeneration = 0
+$script:DataInconsistentPopulation = @{}
+$script:PendingPopulationReplacement = $null
+$script:PopulationReplacementHistory = [Collections.Generic.List[object]]::new()
+$script:RetiredPopulationDistinguishedNames =
+    [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 $script:ScenarioBatchFailures = [Collections.Generic.List[object]]::new()
 $script:ScenarioState = [ordered]@{
     NextPhaseIndex = 0
@@ -1373,9 +1403,6 @@ function Initialize-ScenarioCounts
 
     $allUserCount = [Math]::Max($nUrpU, [Math]::Max($nUlpU, [Math]::Max($nUrpD, $nUlpD)))
     $allGroupCount = [Math]::Max($nGrpU, [Math]::Max($nGlpU, [Math]::Max($nGrpD, $nGlpD)))
-    $includeUsers = $ScenarioCommand -in @("User-Upsert", "User-Properties-Deletion", "RunAll")
-    $includeGroups = $ScenarioCommand -in @("Group-Upsert", "Group-Properties-Deletion", "RunAll")
-
     $script:ScenarioCounts = [ordered]@{
         N_URP_U = $nUrpU
         N_GRP_U = $nGrpU
@@ -1385,8 +1412,8 @@ function Initialize-ScenarioCounts
         N_GRP_D = $nGrpD
         N_ULP_D = $nUlpD
         N_GLP_D = $nGlpD
-        N_User = if ($includeUsers) { $allUserCount } else { 0 }
-        N_Groups = if ($includeGroups) { $allGroupCount } else { 0 }
+        N_User = $allUserCount
+        N_Groups = $allGroupCount
     }
 }
 
@@ -1466,6 +1493,18 @@ function Get-ScenarioEstimatedMinutes
     }
 
     return [int](Get-ScenarioCommandDefinition).FullEstimatedMinutes
+}
+
+function Get-ScenarioTotalEstimatedMinutes
+{
+    if ($PreflightOnly)
+    {
+        return $script:ScenarioPreflightEstimatedMinutes
+    }
+
+    return (Get-ScenarioEstimatedMinutes) +
+        $script:ScenarioPreflightEstimatedMinutes +
+        $script:ScenarioPopulationEstimatedMinutes
 }
 
 function ConvertTo-JsonLine
@@ -2172,6 +2211,10 @@ function New-EntityName
     param([Parameter(Mandatory)] [ValidateSet("Contact", "Group")] [string] $Kind)
 
     $shortKind = if ($Kind -eq "Contact") { "c" } else { "g" }
+    if ($script:PopulationGeneration -gt 0)
+    {
+        return "$ObjectPrefix-r$($script:PopulationGeneration)-$shortKind-$([guid]::NewGuid().ToString('N').Substring(0, 12))"
+    }
     return "$ObjectPrefix-$shortKind-$(New-RandomToken -Length 12)"
 }
 
@@ -2268,8 +2311,19 @@ function Write-RunStatusSnapshot
         Status = $Status
         ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
         ScenarioSetMode = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioSetMode } else { $null }
-        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioEstimatedMinutes } else { $null }
+        SharedPopulationVersion = if ($WorkloadMode -eq "ScenarioTest") { if ($script:LegacyCommandSpecificPopulation) { 0 } else { $script:ScenarioSharedPopulationVersion } } else { $null }
+        LegacyCommandSpecificPopulation = if ($WorkloadMode -eq "ScenarioTest") { $script:LegacyCommandSpecificPopulation } else { $null }
+        ScenarioEstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioEstimatedMinutes } else { $null }
+        PreflightEstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioPreflightEstimatedMinutes } else { $null }
+        PopulationEstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioPopulationEstimatedMinutes } else { $null }
+        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioTotalEstimatedMinutes } else { $null }
         ScenarioBatchTotal = if ($WorkloadMode -eq "ScenarioTest") { @((Get-ScenarioCommandDefinition).PhaseNames).Count * $script:ScenarioBatchesPerPhase } else { $null }
+        PopulationReused = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationReused } else { $null }
+        PopulationImportCompleted = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationImportCompleted } else { $null }
+        PopulationSourceRunDirectory = if ($WorkloadMode -eq "ScenarioTest") { $script:ResolvedPopulationSourceRunDirectory } else { $null }
+        PopulationGeneration = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationGeneration } else { $null }
+        DataInconsistentPopulation = if ($WorkloadMode -eq "ScenarioTest") { @($script:DataInconsistentPopulation.Values) } else { $null }
+        PendingPopulationReplacement = if ($WorkloadMode -eq "ScenarioTest") { $script:PendingPopulationReplacement } else { $null }
         StopRequested = $script:StopRequested
         Failure = $script:Failure
         Counters = $script:Counters
@@ -2306,6 +2360,16 @@ function Save-Checkpoint
         ScenarioBatchesPerPhase = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioBatchesPerPhase } else { $null }
         ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
         ScenarioSetMode = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioSetMode } else { $null }
+        SharedPopulationVersion = if ($WorkloadMode -eq "ScenarioTest") { if ($script:LegacyCommandSpecificPopulation) { 0 } else { $script:ScenarioSharedPopulationVersion } } else { $null }
+        LegacyCommandSpecificPopulation = if ($WorkloadMode -eq "ScenarioTest") { $script:LegacyCommandSpecificPopulation } else { $null }
+        PopulationReused = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationReused } else { $null }
+        PopulationImportCompleted = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationImportCompleted } else { $null }
+        PopulationSourceRunDirectory = if ($WorkloadMode -eq "ScenarioTest") { $script:ResolvedPopulationSourceRunDirectory } else { $null }
+        PopulationGeneration = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationGeneration } else { $null }
+        DataInconsistentPopulation = if ($WorkloadMode -eq "ScenarioTest") { @($script:DataInconsistentPopulation.Values) } else { $null }
+        PendingPopulationReplacement = if ($WorkloadMode -eq "ScenarioTest") { $script:PendingPopulationReplacement } else { $null }
+        PopulationReplacementHistory = if ($WorkloadMode -eq "ScenarioTest") { @($script:PopulationReplacementHistory) } else { $null }
+        RetiredPopulationDistinguishedNames = if ($WorkloadMode -eq "ScenarioTest") { @($script:RetiredPopulationDistinguishedNames) } else { $null }
         ScenarioState = $script:ScenarioState
         ScenarioCompletedObjectWork = $script:ScenarioCompletedObjectWork
         ScenarioBatchSummaries = @($script:ScenarioBatchSummaries)
@@ -2384,6 +2448,60 @@ function Restore-Checkpoint
             $checkpointBatchesPerPhase -ne $script:ScenarioBatchesPerPhase)
         {
             throw "ScenarioTest checkpoint uses an incompatible phase plan (version $checkpointPlanVersion, $checkpointBatchesPerPhase batches per phase). Start a new run; the changed phase order and batch count cannot be resumed safely."
+        }
+        $checkpointSharedPopulationVersion =
+            if ($state.PSObject.Properties.Name -contains "SharedPopulationVersion")
+            {
+                [int]$state.SharedPopulationVersion
+            }
+            else
+            {
+                0
+            }
+        if ($checkpointSharedPopulationVersion -eq 0)
+        {
+            $script:LegacyCommandSpecificPopulation = $true
+            $legacyIncludesUsers = $ScenarioCommand -in @("User-Upsert", "User-Properties-Deletion", "RunAll")
+            $legacyIncludesGroups = $ScenarioCommand -in @("Group-Upsert", "Group-Properties-Deletion", "RunAll")
+            $script:ScenarioCounts.N_User =
+                if ($legacyIncludesUsers)
+                {
+                    [Math]::Max(
+                        [int]$script:ScenarioCounts.N_URP_U,
+                        [Math]::Max(
+                            [int]$script:ScenarioCounts.N_ULP_U,
+                            [Math]::Max(
+                                [int]$script:ScenarioCounts.N_URP_D,
+                                [int]$script:ScenarioCounts.N_ULP_D)))
+                }
+                else
+                {
+                    0
+                }
+            $script:ScenarioCounts.N_Groups =
+                if ($legacyIncludesGroups)
+                {
+                    [Math]::Max(
+                        [int]$script:ScenarioCounts.N_GRP_U,
+                        [Math]::Max(
+                            [int]$script:ScenarioCounts.N_GLP_U,
+                            [Math]::Max(
+                                [int]$script:ScenarioCounts.N_GRP_D,
+                                [int]$script:ScenarioCounts.N_GLP_D)))
+                }
+                else
+                {
+                    0
+                }
+        }
+        elseif ($state.PSObject.Properties.Name -contains "LegacyCommandSpecificPopulation")
+        {
+            $script:LegacyCommandSpecificPopulation = [bool]$state.LegacyCommandSpecificPopulation
+        }
+        if (-not [string]::IsNullOrWhiteSpace($PopulationSourceRunDirectory) -and
+            $checkpointSharedPopulationVersion -ne $script:ScenarioSharedPopulationVersion)
+        {
+            throw "ScenarioTest checkpoint shared-population version '$checkpointSharedPopulationVersion' is incompatible with version '$($script:ScenarioSharedPopulationVersion)'. Start a new run."
         }
         $checkpointScenarioCommand =
             if ($state.PSObject.Properties.Name -contains "ScenarioCommand")
@@ -2500,6 +2618,67 @@ function Restore-Checkpoint
     {
         $script:ScenarioCompletedObjectWork = [long]$state.ScenarioCompletedObjectWork
     }
+    if ($state.PSObject.Properties.Name -contains "PopulationReused")
+    {
+        $script:PopulationReused = [bool]$state.PopulationReused
+    }
+    if ($state.PSObject.Properties.Name -contains "PopulationSourceRunDirectory")
+    {
+        $script:ResolvedPopulationSourceRunDirectory = [string]$state.PopulationSourceRunDirectory
+    }
+    if ($state.PSObject.Properties.Name -contains "PopulationImportCompleted")
+    {
+        $script:PopulationImportCompleted = [bool]$state.PopulationImportCompleted
+    }
+    if ($state.PSObject.Properties.Name -contains "PopulationGeneration")
+    {
+        $script:PopulationGeneration = [int]$state.PopulationGeneration
+    }
+    if ($state.PSObject.Properties.Name -contains "DataInconsistentPopulation")
+    {
+        foreach ($entry in @($state.DataInconsistentPopulation))
+        {
+            if ($null -eq $entry)
+            {
+                continue
+            }
+            $entryGuid = [Guid]::Empty
+            if ([Guid]::TryParse([string]$entry.Guid, [ref]$entryGuid))
+            {
+                $script:DataInconsistentPopulation[$entryGuid.ToString("D")] = $entry
+            }
+        }
+    }
+    if ($state.PSObject.Properties.Name -contains "PendingPopulationReplacement")
+    {
+        if ($null -eq $state.PendingPopulationReplacement)
+        {
+            $script:PendingPopulationReplacement = $null
+        }
+        else
+        {
+            $replacement = [ordered]@{}
+            foreach ($property in $state.PendingPopulationReplacement.PSObject.Properties)
+            {
+                $replacement[$property.Name] = $property.Value
+            }
+            $script:PendingPopulationReplacement = $replacement
+        }
+    }
+    if ($state.PSObject.Properties.Name -contains "PopulationReplacementHistory")
+    {
+        foreach ($entry in @($state.PopulationReplacementHistory))
+        {
+            $script:PopulationReplacementHistory.Add($entry)
+        }
+    }
+    if ($state.PSObject.Properties.Name -contains "RetiredPopulationDistinguishedNames")
+    {
+        foreach ($distinguishedName in @($state.RetiredPopulationDistinguishedNames))
+        {
+            [void]$script:RetiredPopulationDistinguishedNames.Add([string]$distinguishedName)
+        }
+    }
 
     foreach ($property in $state.Counters.PSObject.Properties)
     {
@@ -2509,6 +2688,12 @@ function Restore-Checkpoint
 
 function Initialize-ScenarioPopulationIdentities
 {
+    if ($script:ScenarioPopulationIdentitiesValidated)
+    {
+        Save-Checkpoint
+        return
+    }
+
     foreach ($entity in @($script:Contacts.Values) + @($script:Groups.Values))
     {
         [void](Set-ScenarioEntityDistinguishedName -Entity $entity)
@@ -2602,6 +2787,21 @@ function Assert-ScenarioResumeParameters
     )
     if ($WorkloadMode -eq "ScenarioTest")
     {
+        $savedPopulationSourceRunDirectory =
+            if ($savedPropertyNames -contains "PopulationSourceRunDirectory")
+            {
+                [string]$saved.PopulationSourceRunDirectory
+            }
+            else
+            {
+                $null
+            }
+        $stringChecks += [ordered]@{
+            Name = "PopulationSourceRunDirectory"
+            Saved = $savedPopulationSourceRunDirectory
+            Requested = $PopulationSourceRunDirectory
+            CaseSensitive = $false
+        }
         if ($savedPropertyNames -contains "ScenarioRuntimeDependencyRoot" -and
             -not [string]::IsNullOrWhiteSpace([string]$saved.ScenarioRuntimeDependencyRoot))
         {
@@ -2632,6 +2832,19 @@ function Assert-ScenarioResumeParameters
     if ([bool]$saved.WhatIfTraffic -ne [bool]$WhatIfTraffic)
     {
         $mismatches.Add("WhatIfTraffic ('$([bool]$saved.WhatIfTraffic)' != '$([bool]$WhatIfTraffic)')")
+    }
+    $savedCleanupOnSuccess =
+        if ($savedPropertyNames -contains "CleanupOnSuccess")
+        {
+            [bool]$saved.CleanupOnSuccess
+        }
+        else
+        {
+            $false
+        }
+    if ($savedCleanupOnSuccess -ne [bool]$CleanupOnSuccess)
+    {
+        $mismatches.Add("CleanupOnSuccess ('$savedCleanupOnSuccess' != '$([bool]$CleanupOnSuccess)')")
     }
     if ($mismatches.Count -gt 0)
     {
@@ -2705,7 +2918,12 @@ function Initialize-RunDirectory
         WorkloadMode = $WorkloadMode
         ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
         ScenarioSetMode = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioSetMode } else { $null }
-        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioEstimatedMinutes } else { $null }
+        SharedPopulationVersion = if ($WorkloadMode -eq "ScenarioTest") { if ($script:LegacyCommandSpecificPopulation) { 0 } else { $script:ScenarioSharedPopulationVersion } } else { $null }
+        LegacyCommandSpecificPopulation = if ($WorkloadMode -eq "ScenarioTest") { $script:LegacyCommandSpecificPopulation } else { $null }
+        ScenarioEstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioEstimatedMinutes } else { $null }
+        PreflightEstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioPreflightEstimatedMinutes } else { $null }
+        PopulationEstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioPopulationEstimatedMinutes } else { $null }
+        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioTotalEstimatedMinutes } else { $null }
         DurationHours = $DurationHours
         OperationsPerSecond = $OperationsPerSecond
         InitialRecipientCount = $InitialRecipientCount
@@ -2731,6 +2949,10 @@ function Initialize-RunDirectory
         SkipDeletionOperations = [bool]$SkipDeletionOperations
         PreflightOnly = [bool]$PreflightOnly
         WhatIfTraffic = [bool]$WhatIfTraffic
+        CleanupOnSuccess = [bool]$CleanupOnSuccess
+        PopulationSourceRunDirectory = if ($WorkloadMode -eq "ScenarioTest") { $PopulationSourceRunDirectory } else { $null }
+        PopulationImportCompleted = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationImportCompleted } else { $null }
+        PopulationGeneration = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationGeneration } else { $null }
         ScenarioCounts = $script:ScenarioCounts
     }
     $parameters | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $script:RunDirectory "parameters.json") -Encoding UTF8
@@ -4449,13 +4671,106 @@ function Add-ScenarioBatchFailure
     })
 }
 
+function Add-ScenarioDataInconsistency
+{
+    param(
+        [Parameter(Mandatory)] [object] $Item,
+        [Parameter(Mandatory)] [string] $Category,
+        [hashtable] $Details)
+
+    $guid = ([Guid]$Item.Guid).ToString("D")
+    $currentBatch = $script:ScenarioState.CurrentBatch
+    $entityKind =
+        if ($currentBatch -is [System.Collections.IDictionary] -and
+            $currentBatch.Contains("EntityKind"))
+        {
+            [string]$currentBatch["EntityKind"]
+        }
+        elseif ($null -ne $currentBatch -and
+            $currentBatch.PSObject.Properties.Name -contains "EntityKind")
+        {
+            [string]$currentBatch.EntityKind
+        }
+        elseif (@($script:Contacts.Values | Where-Object { ([Guid]$_.Guid).ToString("D") -eq $guid }).Count -gt 0)
+        {
+            "User"
+        }
+        else
+        {
+            "Group"
+        }
+    $phaseIndex = if ($null -ne $currentBatch) { [int]$currentBatch.PhaseIndex } else { [int]$script:ScenarioState.NextPhaseIndex }
+    $phase = if ($null -ne $currentBatch) { [string]$currentBatch.Phase } else { $null }
+    $record = [ordered]@{
+        Guid = $guid
+        Identity = [string]$Item.Identity
+        EntityKind = $entityKind
+        PhaseIndex = $phaseIndex
+        Phase = $phase
+        Category = $Category
+        ResultCode = if ($null -ne $Details -and $Details.ContainsKey("ResultCode")) { [string]$Details.ResultCode } else { $null }
+        Reason = if ($null -ne $Details -and $Details.ContainsKey("Reason")) { [string]$Details.Reason } else { $null }
+        RecordedUtc = [datetime]::UtcNow.ToString("o")
+    }
+    $script:DataInconsistentPopulation[$guid] = $record
+
+    if ($null -eq $script:PendingPopulationReplacement)
+    {
+        $script:PendingPopulationReplacement = [ordered]@{
+            Status = "Pending"
+            PhaseIndex = $phaseIndex
+            Phase = $phase
+            EntityKind = $entityKind
+            FailedGuids = @($guid)
+            RequestedUtc = [datetime]::UtcNow.ToString("o")
+        }
+    }
+    else
+    {
+        if ([int]$script:PendingPopulationReplacement.PhaseIndex -ne $phaseIndex -or
+            -not [string]::Equals(
+                [string]$script:PendingPopulationReplacement.EntityKind,
+                $entityKind,
+                [StringComparison]::OrdinalIgnoreCase))
+        {
+            throw "Data inconsistencies from different phases or entity kinds cannot share one population replacement."
+        }
+        $script:PendingPopulationReplacement.FailedGuids = @(
+            @($script:PendingPopulationReplacement.FailedGuids) + $guid |
+                Select-Object -Unique
+        )
+        if ([string]$script:PendingPopulationReplacement.Status -in @("Creating", "Validating"))
+        {
+            $script:PendingPopulationReplacement.Status = "Pending"
+            $script:PendingPopulationReplacement.ReplacementValidationFailedUtc =
+                [datetime]::UtcNow.ToString("o")
+        }
+    }
+}
+
 function Invoke-DueValidations
 {
-    param([switch] $AggregateFailures)
+    param(
+        [switch] $AggregateFailures,
+        [string[]] $OnlyGuids)
+
+    $validationItems = @($script:PendingValidations.Values)
+    if ($null -ne $OnlyGuids -and $OnlyGuids.Count -gt 0)
+    {
+        $allowedGuids = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($guid in $OnlyGuids)
+        {
+            [void]$allowedGuids.Add(([Guid]$guid).ToString("D"))
+        }
+        $validationItems = @(
+            $validationItems |
+                Where-Object { $allowedGuids.Contains(([Guid]$_.Guid).ToString("D")) }
+        )
+    }
 
     if ($WhatIfTraffic)
     {
-        foreach ($item in @($script:PendingValidations.Values))
+        foreach ($item in $validationItems)
         {
             Complete-Validation -Item $item -Status "Passed" -Details @{ WhatIf = $true }
         }
@@ -4463,7 +4778,7 @@ function Invoke-DueValidations
     }
 
     $now = [datetime]::UtcNow
-    $due = @($script:PendingValidations.Values | Where-Object { (ConvertFrom-IsoUtc -Value ([string]$_.DueUtc)) -le $now })
+    $due = @($validationItems | Where-Object { (ConvertFrom-IsoUtc -Value ([string]$_.DueUtc)) -le $now })
     if ($due.Count -eq 0)
     {
         return
@@ -4569,6 +4884,7 @@ function Invoke-DueValidations
                     }
                     if ((ConvertFrom-IsoUtc -Value ([string]$item.DeadlineUtc)) -le $now)
                     {
+                        Add-ScenarioDataInconsistency -Item $item -Category "ConsistencyFailure" -Details $itemResult
                         Complete-Validation -Item $item -Status "Failed" -Details $itemResult
                         if ($AggregateFailures)
                         {
@@ -4605,6 +4921,10 @@ function Invoke-DueValidations
             {
                 if ((ConvertFrom-IsoUtc -Value ([string]$item.DeadlineUtc)) -le $now)
                 {
+                    if ([string]$result.Reason -eq "ObjectStillPresentInObjectStore")
+                    {
+                        Add-ScenarioDataInconsistency -Item $item -Category "DeletionConsistencyFailure" -Details $result
+                    }
                     Complete-Validation -Item $item -Status "Failed" -Details $result
                     if ($AggregateFailures)
                     {
@@ -4750,24 +5070,449 @@ function Initialize-TestPopulation
     $recipientsToCreate = [math]::Max(0, $recipientCount - $script:Contacts.Count)
     $groupsToCreate = [math]::Max(0, $groupCount - $script:Groups.Count)
 
-    Write-RunEvent -Level "Information" -Message "Creating initial isolated test population." -Data @{
+    Write-RunEvent -Level "Information" -Message "Ensuring the isolated test population is complete." -Data @{
         TargetRecipients = $recipientCount
         TargetGroups = $groupCount
         ExistingRecipients = $script:Contacts.Count
         ExistingGroups = $script:Groups.Count
         RecipientsToCreate = $recipientsToCreate
         GroupsToCreate = $groupsToCreate
+        PopulationReused = $script:PopulationReused
+        PopulationSourceRunDirectory = $script:ResolvedPopulationSourceRunDirectory
     }
 
     for ($index = 0; $index -lt $recipientsToCreate -and -not $script:StopRequested; $index++)
     {
         Invoke-TrafficOperation -Name "BootstrapContact" -Action { New-TestContact }
+        if ($null -ne $script:PendingPopulationReplacement -and
+            [string]$script:PendingPopulationReplacement.Status -eq "Creating")
+        {
+            Save-Checkpoint
+        }
     }
     for ($index = 0; $index -lt $groupsToCreate -and -not $script:StopRequested; $index++)
     {
         Invoke-TrafficOperation -Name "BootstrapGroup" -Action { New-TestGroup }
+        if ($null -ne $script:PendingPopulationReplacement -and
+            [string]$script:PendingPopulationReplacement.Status -eq "Creating")
+        {
+            Save-Checkpoint
+        }
     }
     Save-Checkpoint
+}
+
+function Import-ScenarioPopulation
+{
+    if ([string]::IsNullOrWhiteSpace($PopulationSourceRunDirectory))
+    {
+        return
+    }
+
+    $sourceRunDirectory = (Resolve-Path -LiteralPath $PopulationSourceRunDirectory -ErrorAction Stop).Path
+    if ([string]::Equals($sourceRunDirectory, $script:RunDirectory, [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "Population source run directory must differ from the active run directory."
+    }
+
+    $sourceParametersPath = Join-Path $sourceRunDirectory "parameters.json"
+    $sourceCheckpointPath = Join-Path $sourceRunDirectory "checkpoint.json"
+    $sourceSummaryPath = Join-Path $sourceRunDirectory "summary.json"
+    foreach ($requiredPath in @($sourceParametersPath, $sourceCheckpointPath, $sourceSummaryPath))
+    {
+        if (-not (Test-Path -LiteralPath $requiredPath))
+        {
+            throw "Population source is incomplete; required artifact is missing: $requiredPath"
+        }
+    }
+    $maximumArtifactBytes = @{
+        $sourceParametersPath = 4MB
+        $sourceCheckpointPath = 128MB
+        $sourceSummaryPath = 16MB
+    }
+    foreach ($artifactPath in $maximumArtifactBytes.Keys)
+    {
+        if ((Get-Item -LiteralPath $artifactPath).Length -gt [long]$maximumArtifactBytes[$artifactPath])
+        {
+            throw "Population source artifact exceeds its safety limit: $artifactPath"
+        }
+    }
+
+    $sourceParameters = Get-Content -LiteralPath $sourceParametersPath -Raw | ConvertFrom-Json
+    $sourceParameterNames = @(
+        $sourceParameters.PSObject.Properties |
+            ForEach-Object { $_.Name }
+    )
+    $sourceCheckpoint = Get-Content -LiteralPath $sourceCheckpointPath -Raw | ConvertFrom-Json
+    $sourceSummary = Get-Content -LiteralPath $sourceSummaryPath -Raw | ConvertFrom-Json
+    if (-not [string]::Equals([string]$sourceSummary.Status, "Passed", [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "Population source run '$sourceRunDirectory' did not finish with status Passed."
+    }
+    if (-not [string]::Equals([string]$sourceParameters.WorkloadMode, "ScenarioTest", [StringComparison]::OrdinalIgnoreCase))
+    {
+        throw "Population source run '$sourceRunDirectory' is not a ScenarioTest run."
+    }
+    if ($sourceParameterNames -notcontains "SharedPopulationVersion" -or
+        [int]$sourceParameters.SharedPopulationVersion -ne $script:ScenarioSharedPopulationVersion)
+    {
+        throw "Population source run '$sourceRunDirectory' does not contain a compatible shared population."
+    }
+    if ($sourceParameterNames -notcontains "CleanupOnSuccess" -or
+        [bool]$sourceParameters.CleanupOnSuccess)
+    {
+        throw "Population source run '$sourceRunDirectory' cleaned up its objects and cannot be reused."
+    }
+
+    $compatibilityChecks = @(
+        [ordered]@{ Name = "Organization"; Source = [string]$sourceParameters.Organization; Requested = $Organization; CaseSensitive = $false }
+        [ordered]@{ Name = "ObjectPrefix"; Source = [string]$sourceParameters.ObjectPrefix; Requested = $ObjectPrefix; CaseSensitive = $true }
+        [ordered]@{ Name = "Side"; Source = [string]$sourceParameters.Side; Requested = $Side; CaseSensitive = $false }
+        [ordered]@{ Name = "ObjectStoreDestination"; Source = [string]$sourceParameters.ObjectStoreDestination; Requested = $ObjectStoreDestination; CaseSensitive = $false }
+    )
+    foreach ($check in $compatibilityChecks)
+    {
+        $comparison = if ($check.CaseSensitive) { [StringComparison]::Ordinal } else { [StringComparison]::OrdinalIgnoreCase }
+        if (-not [string]::Equals([string]$check.Source, [string]$check.Requested, $comparison))
+        {
+            throw "Population source $($check.Name) '$($check.Source)' is incompatible with requested value '$($check.Requested)'."
+        }
+    }
+    if ([bool]$sourceParameters.WhatIfTraffic -ne [bool]$WhatIfTraffic)
+    {
+        throw "Population source WhatIfTraffic mode is incompatible with the requested run."
+    }
+
+    $importedContacts = 0
+    $missingImportedObjects = 0
+    foreach ($contact in @($sourceCheckpoint.Contacts))
+    {
+        try
+        {
+            [void](Set-ScenarioEntityDistinguishedName -Entity $contact)
+            $script:Contacts[[string]$contact.Identity] = $contact
+            $importedContacts++
+        }
+        catch
+        {
+            $missingImportedObjects++
+            Write-RunEvent -Level "Warning" -Message "Skipped missing shared contact '$($contact.Identity)'." -Data @{
+                SourceRunDirectory = $sourceRunDirectory
+                Guid = [string]$contact.Guid
+                Error = $_.Exception.Message
+            }
+        }
+    }
+
+    $importedGroups = 0
+    foreach ($group in @($sourceCheckpoint.Groups))
+    {
+        try
+        {
+            $group.Members = @($group.Members)
+            [void](Set-ScenarioEntityDistinguishedName -Entity $group)
+            $script:Groups[[string]$group.Identity] = $group
+            $importedGroups++
+        }
+        catch
+        {
+            $missingImportedObjects++
+            Write-RunEvent -Level "Warning" -Message "Skipped missing shared group '$($group.Identity)'." -Data @{
+                SourceRunDirectory = $sourceRunDirectory
+                Guid = [string]$group.Guid
+                Error = $_.Exception.Message
+            }
+        }
+    }
+
+    $script:PopulationReused = $importedContacts -gt 0 -or $importedGroups -gt 0
+    $script:ResolvedPopulationSourceRunDirectory = $sourceRunDirectory
+    $script:PopulationImportCompleted = $true
+    $script:PopulationGeneration =
+        if ($sourceCheckpoint.PSObject.Properties.Name -contains "PopulationGeneration")
+        {
+            [int]$sourceCheckpoint.PopulationGeneration
+        }
+        else
+        {
+            0
+        }
+    if ($missingImportedObjects -gt 0)
+    {
+        $script:PopulationGeneration = [math]::Max(1, $script:PopulationGeneration + 1)
+    }
+    $script:ScenarioPopulationIdentitiesValidated = $true
+    if ($importedContacts -lt [int]$script:ScenarioCounts.N_User -or
+        $importedGroups -lt [int]$script:ScenarioCounts.N_Groups)
+    {
+        $script:ScenarioPopulationEstimatedMinutes = 15
+    }
+    else
+    {
+        $script:ScenarioPopulationEstimatedMinutes = 0
+    }
+
+    Write-RunEvent -Level "Information" -Message "Imported a compatible shared ScenarioTest population." -Data @{
+        SourceRunDirectory = $sourceRunDirectory
+        ImportedContacts = $importedContacts
+        ImportedGroups = $importedGroups
+        MissingContactsToCreate = [math]::Max(0, [int]$script:ScenarioCounts.N_User - $importedContacts)
+        MissingGroupsToCreate = [math]::Max(0, [int]$script:ScenarioCounts.N_Groups - $importedGroups)
+    }
+    $parametersPath = Join-Path $script:RunDirectory "parameters.json"
+    $runParameters = Get-Content -LiteralPath $parametersPath -Raw | ConvertFrom-Json
+    $runParameters | Add-Member -MemberType NoteProperty -Name PopulationReused -Value $script:PopulationReused -Force
+    $runParameters | Add-Member -MemberType NoteProperty -Name PopulationImportCompleted -Value $script:PopulationImportCompleted -Force
+    $runParameters | Add-Member -MemberType NoteProperty -Name PopulationSourceRunDirectory -Value $script:ResolvedPopulationSourceRunDirectory -Force
+    $runParameters | Add-Member -MemberType NoteProperty -Name PopulationEstimatedMinutes -Value $script:ScenarioPopulationEstimatedMinutes -Force
+    $runParameters | Add-Member -MemberType NoteProperty -Name EstimatedMinutes -Value (Get-ScenarioTotalEstimatedMinutes) -Force
+    $runParameters | Add-Member -MemberType NoteProperty -Name PopulationGeneration -Value $script:PopulationGeneration -Force
+    Write-AtomicJsonSnapshot -Path $parametersPath -InputObject $runParameters -Depth 6
+    Save-Checkpoint
+}
+
+function Initialize-ScenarioPopulationReplacement
+{
+    if ($null -eq $script:PendingPopulationReplacement)
+    {
+        return
+    }
+
+    $replacement = $script:PendingPopulationReplacement
+    $phaseIndex = [int]$replacement.PhaseIndex
+    $entityKind = [string]$replacement.EntityKind
+    if ([string]$replacement.Status -eq "Pending")
+    {
+        $retiredEntities =
+            if ($entityKind -eq "User")
+            {
+                @($script:Contacts.Values)
+            }
+            elseif ($entityKind -eq "Group")
+            {
+                @($script:Groups.Values)
+            }
+            else
+            {
+                throw "Unsupported population replacement entity kind '$entityKind'."
+            }
+        $script:PopulationGeneration++
+        $retiredGuids = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($entity in $retiredEntities)
+        {
+            [void]$retiredGuids.Add(([Guid]$entity.Guid).ToString("D"))
+            if ($entity.PSObject.Properties.Name -contains "DistinguishedName" -and
+                -not [string]::IsNullOrWhiteSpace([string]$entity.DistinguishedName))
+            {
+                [void]$script:RetiredPopulationDistinguishedNames.Add([string]$entity.DistinguishedName)
+            }
+        }
+        $retiredPopulationFile = "retired-population-p{0:D2}-g{1:D2}.json" -f $phaseIndex, $script:PopulationGeneration
+        Write-AtomicJsonSnapshot `
+            -Path (Join-Path $script:RunDirectory $retiredPopulationFile) `
+            -InputObject ([ordered]@{
+                TimestampUtc = [datetime]::UtcNow.ToString("o")
+                PhaseIndex = $phaseIndex
+                Phase = [string]$replacement.Phase
+                EntityKind = $entityKind
+                Generation = $script:PopulationGeneration
+                FailedGuids = @($replacement.FailedGuids)
+                RetiredEntities = $retiredEntities
+            }) `
+            -Depth 8
+
+        if ($entityKind -eq "User")
+        {
+            $script:Contacts = @{}
+        }
+        else
+        {
+            $script:Groups = @{}
+        }
+        foreach ($validationGuid in @($script:PendingValidations.Keys))
+        {
+            if ($retiredGuids.Contains([string]$validationGuid))
+            {
+                [void]$script:PendingValidations.Remove([string]$validationGuid)
+            }
+        }
+        $script:ScenarioState.NextPhaseIndex = $phaseIndex
+        $script:ScenarioState.NextBatchIndex = 0
+        $script:ScenarioState.CurrentBatch = $null
+        $script:ScenarioState.CurrentBatchCompletedGuids = @()
+
+        $retainedBatchSummaries = [Collections.Generic.List[object]]::new()
+        foreach ($summary in @($script:ScenarioBatchSummaries | Where-Object { [int]$_.PhaseIndex -lt $phaseIndex }))
+        {
+            $retainedBatchSummaries.Add($summary)
+        }
+        $script:ScenarioBatchSummaries = $retainedBatchSummaries
+        $retainedPhaseSummaries = [Collections.Generic.List[object]]::new()
+        foreach ($summary in @($script:ScenarioPhaseSummaries | Where-Object { [int]$_.PhaseIndex -lt $phaseIndex }))
+        {
+            $retainedPhaseSummaries.Add($summary)
+        }
+        $script:ScenarioPhaseSummaries = $retainedPhaseSummaries
+        $script:ScenarioCompletedObjectWork = [long](
+            ($script:ScenarioBatchSummaries | Measure-Object ObjectCount -Sum).Sum)
+        $script:Counters.ScenarioBatchesCompleted = [long]$script:ScenarioBatchSummaries.Count
+
+        $planPattern = "scenario-plan-p{0:D2}-b*.json" -f $phaseIndex
+        Get-ChildItem -LiteralPath $script:RunDirectory -Filter $planPattern -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force
+
+        $replacement.Status = "Creating"
+        $replacement.Generation = $script:PopulationGeneration
+        $replacement.RetiredPopulationFile = $retiredPopulationFile
+        $replacement.ReplacementStartedUtc = [datetime]::UtcNow.ToString("o")
+        $script:PendingPopulationReplacement = $replacement
+        $script:ScenarioPopulationIdentitiesValidated = $false
+        Save-Checkpoint
+        Write-RunEvent -Level "Warning" -Message "Retired the phase population after a proven data inconsistency." -Data @{
+            PhaseIndex = $phaseIndex
+            Phase = [string]$replacement.Phase
+            EntityKind = $entityKind
+            FailedGuids = @($replacement.FailedGuids)
+            RetiredObjectCount = $retiredEntities.Count
+            PopulationGeneration = $script:PopulationGeneration
+            RetiredPopulationFile = $retiredPopulationFile
+        }
+    }
+}
+
+function Test-ScenarioPopulationReplacement
+{
+    if ($null -eq $script:PendingPopulationReplacement -or
+        [string]$script:PendingPopulationReplacement.Status -notin @("Creating", "Validating"))
+    {
+        return
+    }
+
+    $entityKind = [string]$script:PendingPopulationReplacement.EntityKind
+    $expectedCount =
+        if ($entityKind -eq "User")
+        {
+            [int]$script:ScenarioCounts.N_User
+        }
+        else
+        {
+            [int]$script:ScenarioCounts.N_Groups
+        }
+    $actualCount =
+        if ($entityKind -eq "User")
+        {
+            $script:Contacts.Count
+        }
+        else
+        {
+            $script:Groups.Count
+        }
+    if ($actualCount -lt $expectedCount)
+    {
+        throw "Replacement $entityKind population is incomplete: $actualCount/$expectedCount."
+    }
+
+    $replacementGuids = [Collections.Generic.List[Guid]]::new()
+    $entities =
+        if ($entityKind -eq "User")
+        {
+            @($script:Contacts.Values)
+        }
+        else
+        {
+            @($script:Groups.Values)
+        }
+    foreach ($entity in $entities)
+    {
+        $replacementGuids.Add([Guid]$entity.Guid)
+    }
+    $script:PendingPopulationReplacement.Status = "Validating"
+    $script:PendingPopulationReplacement.ReplacementGuids =
+        @($replacementGuids | ForEach-Object { $_.ToString("D") })
+    $script:PendingPopulationReplacement.ValidationStartedUtc =
+        [datetime]::UtcNow.ToString("o")
+    Save-Checkpoint
+    Wait-ScenarioBatchValidations -Guids $replacementGuids
+    if ($script:StopRequested)
+    {
+        return
+    }
+    $remaining = @(
+        $script:PendingPopulationReplacement.ReplacementGuids |
+            Where-Object { $script:PendingValidations.ContainsKey([string]$_) }
+    )
+    if ($remaining.Count -gt 0)
+    {
+        throw "Replacement population validation is incomplete for $($remaining.Count) GUIDs."
+    }
+    $script:PendingPopulationReplacement.Status = "Validated"
+    $script:PendingPopulationReplacement.ValidationCompletedUtc =
+        [datetime]::UtcNow.ToString("o")
+    Save-Checkpoint
+}
+
+function Complete-ScenarioPopulationReplacement
+{
+    if ($null -eq $script:PendingPopulationReplacement -or
+        [string]$script:PendingPopulationReplacement.Status -ne "Validated")
+    {
+        return
+    }
+
+    $entityKind = [string]$script:PendingPopulationReplacement.EntityKind
+    $actualCount =
+        if ($entityKind -eq "User")
+        {
+            $script:Contacts.Count
+        }
+        else
+        {
+            $script:Groups.Count
+        }
+
+    $completed = [ordered]@{
+        PhaseIndex = [int]$script:PendingPopulationReplacement.PhaseIndex
+        Phase = [string]$script:PendingPopulationReplacement.Phase
+        EntityKind = $entityKind
+        FailedGuids = @($script:PendingPopulationReplacement.FailedGuids)
+        Generation = [int]$script:PendingPopulationReplacement.Generation
+        RetiredPopulationFile = [string]$script:PendingPopulationReplacement.RetiredPopulationFile
+        CompletedUtc = [datetime]::UtcNow.ToString("o")
+        ReplacementObjectCount = $actualCount
+    }
+    foreach ($bucket in @(
+        "Recipient", "Group", "Mailbox", "Database", "Policy",
+        "AddressBook", "Server", "Mta", "Computer", "Configuration",
+        "ConfigurationUnit", "OrganizationRoot"))
+    {
+        if (-not $script:ScenarioTargets.ContainsKey($bucket))
+        {
+            continue
+        }
+        $filtered = [Collections.Generic.List[string]]::new()
+        foreach ($distinguishedName in @($script:ScenarioTargets[$bucket]))
+        {
+            if (-not $script:RetiredPopulationDistinguishedNames.Contains([string]$distinguishedName))
+            {
+                $filtered.Add([string]$distinguishedName)
+            }
+        }
+        $script:ScenarioTargets[$bucket] = $filtered
+    }
+    foreach ($contact in @($script:Contacts.Values))
+    {
+        Add-ScenarioTarget -Bucket "Recipient" -Object $contact
+    }
+    foreach ($group in @($script:Groups.Values))
+    {
+        Add-ScenarioTarget -Bucket "Group" -Object $group
+        Add-ScenarioTarget -Bucket "Recipient" -Object $group
+    }
+    Save-ScenarioTargetContext
+    $script:PopulationReplacementHistory.Add($completed)
+    $script:PendingPopulationReplacement = $null
+    Save-Checkpoint
+    Write-RunEvent -Level "Information" -Message "Completed phase population replacement." -Data $completed
 }
 
 function Remove-ScenarioSupportingObjects
@@ -4851,7 +5596,12 @@ function Write-RunSummary
         DurationHours = [math]::Round(($FinishedUtc - $StartedUtc).TotalHours, 4)
         ScenarioCommand = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioCommand } else { $null }
         ScenarioSetMode = if ($WorkloadMode -eq "ScenarioTest") { $ScenarioSetMode } else { $null }
-        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioEstimatedMinutes } else { $null }
+        SharedPopulationVersion = if ($WorkloadMode -eq "ScenarioTest") { if ($script:LegacyCommandSpecificPopulation) { 0 } else { $script:ScenarioSharedPopulationVersion } } else { $null }
+        LegacyCommandSpecificPopulation = if ($WorkloadMode -eq "ScenarioTest") { $script:LegacyCommandSpecificPopulation } else { $null }
+        ScenarioEstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioEstimatedMinutes } else { $null }
+        PreflightEstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioPreflightEstimatedMinutes } else { $null }
+        PopulationEstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioPopulationEstimatedMinutes } else { $null }
+        EstimatedMinutes = if ($WorkloadMode -eq "ScenarioTest") { Get-ScenarioTotalEstimatedMinutes } else { $null }
         ScenarioBatchTotal = if ($WorkloadMode -eq "ScenarioTest") { @((Get-ScenarioCommandDefinition).PhaseNames).Count * $script:ScenarioBatchesPerPhase } else { $null }
         RequestedOperationsPerSecond = $OperationsPerSecond
         ActualOperationsPerSecond = [math]::Round($script:Counters.OperationsSucceeded / $elapsedSeconds, 4)
@@ -4866,6 +5616,14 @@ function Write-RunSummary
         PreflightOnly = [bool]$PreflightOnly
         ScenarioPlanVersion = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioPlanVersion } else { $null }
         ScenarioBatchesPerPhase = if ($WorkloadMode -eq "ScenarioTest") { $script:ScenarioBatchesPerPhase } else { $null }
+        PopulationReused = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationReused } else { $null }
+        PopulationImportCompleted = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationImportCompleted } else { $null }
+        PopulationSourceRunDirectory = if ($WorkloadMode -eq "ScenarioTest") { $script:ResolvedPopulationSourceRunDirectory } else { $null }
+        PopulationGeneration = if ($WorkloadMode -eq "ScenarioTest") { $script:PopulationGeneration } else { $null }
+        DataInconsistentPopulation = if ($WorkloadMode -eq "ScenarioTest") { @($script:DataInconsistentPopulation.Values) } else { $null }
+        PendingPopulationReplacement = if ($WorkloadMode -eq "ScenarioTest") { $script:PendingPopulationReplacement } else { $null }
+        PopulationReplacementHistory = if ($WorkloadMode -eq "ScenarioTest") { @($script:PopulationReplacementHistory) } else { $null }
+        RetiredPopulationDistinguishedNames = if ($WorkloadMode -eq "ScenarioTest") { @($script:RetiredPopulationDistinguishedNames) } else { $null }
         ScenarioState = $script:ScenarioState
         ScenarioPhaseSummaries = @($script:ScenarioPhaseSummaries)
         ScenarioBatchSummaries = @($script:ScenarioBatchSummaries)
@@ -6861,7 +7619,14 @@ function Get-ScenarioPhaseDefinitions
 
 function Get-ScenarioQualificationFingerprint
 {
-    param([switch] $LegacyWithoutScenarioSetMode)
+    param(
+        [switch] $LegacyWithoutScenarioSetMode,
+        [switch] $LegacyWithoutPopulationSource)
+
+    if ($script:LegacyCommandSpecificPopulation)
+    {
+        $LegacyWithoutPopulationSource = $true
+    }
 
     $phases = @(Get-ScenarioPhaseDefinitions)
     $phaseShape = @(
@@ -6896,6 +7661,11 @@ function Get-ScenarioQualificationFingerprint
     $fingerprintInput.Add("WhatIfTraffic", [bool]$WhatIfTraffic)
     $fingerprintInput.Add("CompareSetupScript", ([string]$CompareSetupScript).ToUpperInvariant())
     $fingerprintInput.Add("ScenarioRuntimeDependencyRoot", ([string]$ScenarioRuntimeDependencyRoot).ToUpperInvariant())
+    if (-not $LegacyWithoutPopulationSource)
+    {
+        $fingerprintInput.Add("SharedPopulationVersion", $script:ScenarioSharedPopulationVersion)
+        $fingerprintInput.Add("PopulationSourceRunDirectory", ([string]$PopulationSourceRunDirectory).ToUpperInvariant())
+    }
     $fingerprintInput.Add("UserObjects", $script:ScenarioCounts.N_User)
     $fingerprintInput.Add("GroupObjects", $script:ScenarioCounts.N_Groups)
     $fingerprintInput.Add("Phases", $phaseShape)
@@ -7191,6 +7961,8 @@ function Test-ScenarioDeterministicPlanQualification
         BatchesPerPhase = $script:ScenarioBatchesPerPhase
         ScenarioCommand = $ScenarioCommand
         ScenarioSetMode = $ScenarioSetMode
+        SharedPopulationVersion = if ($script:LegacyCommandSpecificPopulation) { 0 } else { $script:ScenarioSharedPopulationVersion }
+        PopulationSourceRunDirectory = $script:ResolvedPopulationSourceRunDirectory
         RandomSeed = $RandomSeed
         UserObjects = $script:ScenarioCounts.N_User
         GroupObjects = $script:ScenarioCounts.N_Groups
@@ -7319,15 +8091,18 @@ function Get-ScenarioQualificationStatus
     {
         $mismatches.Add("phase selection")
     }
-    $expectedQualificationFingerprint =
-        if ($propertyNames -contains "ScenarioSetMode")
-        {
-            Get-ScenarioQualificationFingerprint
-        }
-        else
-        {
-            Get-ScenarioQualificationFingerprint -LegacyWithoutScenarioSetMode
-        }
+    $fingerprintParameters = @{}
+    if ($propertyNames -notcontains "ScenarioSetMode")
+    {
+        $fingerprintParameters["LegacyWithoutScenarioSetMode"] = $true
+    }
+    if ($propertyNames -notcontains "SharedPopulationVersion" -or
+        [int]$qualification.SharedPopulationVersion -eq 0 -or
+        $propertyNames -notcontains "PopulationSourceRunDirectory")
+    {
+        $fingerprintParameters["LegacyWithoutPopulationSource"] = $true
+    }
+    $expectedQualificationFingerprint = Get-ScenarioQualificationFingerprint @fingerprintParameters
     if (-not [string]::Equals(
         [string]$qualification.QualificationFingerprint,
         $expectedQualificationFingerprint,
@@ -7858,7 +8633,7 @@ function Wait-ScenarioBatchValidations
     $deadlineUtc = [datetime]::UtcNow.AddSeconds($ValidationTimeoutSeconds)
     while (-not $script:StopRequested -and [datetime]::UtcNow -lt $deadlineUtc)
     {
-        Invoke-DueValidations -AggregateFailures:$AggregateFailures
+        Invoke-DueValidations -AggregateFailures:$AggregateFailures -OnlyGuids $keys
         $remaining = @($keys | Where-Object { $script:PendingValidations.ContainsKey($_) })
         if ($TrackScenarioStage -and $null -ne $script:ScenarioState.CurrentBatch)
         {
@@ -8343,6 +9118,7 @@ function Invoke-ScenarioBatch
             PhaseIndex = $PhaseIndex
             BatchIndex = $BatchIndex
             Phase = [string]$PhaseDefinition.Name
+            EntityKind = [string]$PhaseDefinition.EntityKind
             Stage = "Mutating"
             ObjectCount = $objectOrder.Count
             ObjectsAttempted = 0
@@ -8376,6 +9152,7 @@ function Invoke-ScenarioBatch
     }
     foreach ($property in @{
         Stage = "Mutating"
+        EntityKind = [string]$PhaseDefinition.EntityKind
         ObjectCount = $objectOrder.Count
         ObjectsAttempted = $completed.Count
         ObjectsSucceeded = $completed.Count
@@ -9273,7 +10050,10 @@ function Initialize-ScenarioPreflight
     Write-RunEvent -Level "Success" -Message "ScenarioTest preflight passed." -Data @{
         ScenarioCommand = $ScenarioCommand
         ScenarioSetMode = $ScenarioSetMode
-        EstimatedMinutes = Get-ScenarioEstimatedMinutes
+        ScenarioEstimatedMinutes = Get-ScenarioEstimatedMinutes
+        PreflightEstimatedMinutes = $script:ScenarioPreflightEstimatedMinutes
+        PopulationEstimatedMinutes = $script:ScenarioPopulationEstimatedMinutes
+        EstimatedMinutes = Get-ScenarioTotalEstimatedMinutes
         PhaseCount = @((Get-ScenarioCommandDefinition).PhaseNames).Count
         BatchCount = @((Get-ScenarioCommandDefinition).PhaseNames).Count * $script:ScenarioBatchesPerPhase
         AttributeCount = $allNames.Count
@@ -9295,14 +10075,17 @@ try
             ScenarioCommand = $ScenarioCommand
             ScenarioSetMode = $ScenarioSetMode
             PhaseNames = @($commandDefinition.PhaseNames)
-            EstimatedMinutes = Get-ScenarioEstimatedMinutes
-            EstimatedDuration = if ((Get-ScenarioEstimatedMinutes) -ge 60)
+            ScenarioEstimatedMinutes = Get-ScenarioEstimatedMinutes
+            PreflightEstimatedMinutes = $script:ScenarioPreflightEstimatedMinutes
+            PopulationEstimatedMinutes = $script:ScenarioPopulationEstimatedMinutes
+            EstimatedMinutes = Get-ScenarioTotalEstimatedMinutes
+            EstimatedDuration = if ((Get-ScenarioTotalEstimatedMinutes) -ge 60)
             {
-                "{0:0.##} hours" -f ((Get-ScenarioEstimatedMinutes) / 60.0)
+                "{0:0.##} hours" -f ((Get-ScenarioTotalEstimatedMinutes) / 60.0)
             }
             else
             {
-                "$(Get-ScenarioEstimatedMinutes) minutes"
+                "$(Get-ScenarioTotalEstimatedMinutes) minutes"
             }
             BatchCount = @($commandDefinition.PhaseNames).Count * $script:ScenarioBatchesPerPhase
             UserObjects = $script:ScenarioCounts.N_User
@@ -9349,10 +10132,26 @@ try
     }
     else
     {
+        if ($WorkloadMode -eq "ScenarioTest" -and
+            -not [string]::IsNullOrWhiteSpace($PopulationSourceRunDirectory) -and
+            -not $script:PopulationImportCompleted)
+        {
+            Import-ScenarioPopulation
+        }
+        if ($WorkloadMode -eq "ScenarioTest" -and
+            $null -ne $script:PendingPopulationReplacement)
+        {
+            Initialize-ScenarioPopulationReplacement
+        }
         Initialize-TestPopulation
         if ($WorkloadMode -eq "ScenarioTest")
         {
             Initialize-ScenarioPopulationIdentities
+            Test-ScenarioPopulationReplacement
+            if (-not $script:StopRequested)
+            {
+                Complete-ScenarioPopulationReplacement
+            }
         }
 
         if ($script:StopRequested)

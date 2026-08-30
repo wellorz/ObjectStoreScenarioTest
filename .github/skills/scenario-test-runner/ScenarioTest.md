@@ -70,6 +70,32 @@ requested with a different command or mode. Mini-set mode preserves the full
 batch-0 `MUTATE_ALL -> WAIT_15_SECONDS -> COMPARE_ALL` barrier and aggregated
 failure behavior; it only omits repetitions 1-3.
 
+## Shared Population
+
+The first ScenarioTest command on a TDS creates the complete reusable
+population of 235 contacts and 267 groups, even when the selected phases use
+only one object type. A later command may pass
+`-PopulationSourceRunDirectory` for a successful compatible run.
+
+Population reuse imports only contact and group ledger records. It must not
+import phase state, batch plans, counters, pending validations, supporting
+objects, failures, or qualification state. The new command receives its own
+run directory and performs mandatory preflight and qualification.
+
+A source must have passed, must not have cleaned up its population, and must
+match organization, exact object prefix, side, Object Store destination, and
+WhatIf mode. Resolve every imported object GUID against AD before use. Missing
+objects may be recreated to restore the complete shared population.
+
+Persist whether population import completed. If a run is interrupted before
+that point, resume must repeat the idempotent import before population
+completion; it must not silently create a duplicate population from an empty
+checkpoint.
+
+Persist `SharedPopulationVersion=1` in run artifacts. Only runs carrying the
+current shared-population version are eligible as sources; older
+command-specific populations must not be assumed complete.
+
 1. Use a logged random seed so every run can be reproduced.
 2. Shuffle object order independently for each phase and repetition.
 3. Select properties without replacement for each object and batch.
@@ -203,7 +229,30 @@ batches total.
 
 Phase transitions reuse the existing 235 User recipients or 267 Group
 recipients from the run ledger. Do not recreate, replace, or renumber objects
-that passed the previous phase.
+that passed the previous phase unless a terminal object-specific data
+inconsistency requires replacement of the complete entity set for the failed
+phase.
+
+Record the GUID of every object that reaches a terminal comparison result other
+than `DataSame`, and every deleted object proven
+`ObjectStillPresentInObjectStore`. Do not classify cookie timeouts, skipped or
+incomplete comparisons, read failures, mutation failures, or harness failures
+as data inconsistencies.
+
+On resume after a recorded data inconsistency, preserve the old set as a
+diagnostic artifact, increment the population generation, create a complete
+new User or Group set for the failed phase, discard that phase's materialized
+plans and progress, and restart the phase at batch 0. Preserve prior completed
+phases. Checkpoint each successful replacement creation and keep replacement
+state pending until every new GUID passes consistency validation. Interruption
+during creation or validation must resume without clearing the partially
+created replacement set. Remove retired distinguished names from cached
+scenario target pools and add the replacement entities before retry.
+
+Replacement validation must be scoped to the replacement GUIDs. Pending
+validations for the untouched entity kind remain queued and run afterward; a
+proven mismatch there schedules a separate replacement rather than merging
+different entity kinds into one replacement operation.
 
 The checkpoint records the phase-plan version and batches-per-phase value.
 Checkpoints from an older ScenarioTest plan must not be resumed; start a new
