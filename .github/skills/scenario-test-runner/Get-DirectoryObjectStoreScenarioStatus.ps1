@@ -20,10 +20,19 @@ $statusPath = Join-Path $RunDirectory "status.json"
 $summaryPath = Join-Path $RunDirectory "summary.json"
 $eventPath = Join-Path $RunDirectory "events.jsonl"
 $pausedPath = Join-Path $RunDirectory "PAUSED"
+$parametersPath = Join-Path $RunDirectory "parameters.json"
 
 $process = if ($ProcessId -gt 0)
 {
     Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+}
+else
+{
+    $null
+}
+$parameters = if (Test-Path -LiteralPath $parametersPath)
+{
+    Get-Content -LiteralPath $parametersPath -Raw | ConvertFrom-Json
 }
 else
 {
@@ -36,6 +45,38 @@ $status = if (Test-Path -LiteralPath $statusPath)
 else
 {
     $null
+}
+$processIdentityVerified = $false
+if ($null -ne $process -and
+    $ResumeStartedUtc -gt [datetime]::MinValue -and
+    $null -ne $parameters -and
+    $null -ne $status)
+{
+    $startTimeMatches =
+        [math]::Abs(($process.StartTime.ToUniversalTime() - $ResumeStartedUtc.ToUniversalTime()).TotalSeconds) -le 2
+    $statusPidMatches = [int]$status.ProcessId -eq $ProcessId
+    $statusTimeMatches = [datetime]$status.UpdatedUtc -ge $ResumeStartedUtc
+    $runIdMatches = [string]::Equals(
+        [string]$status.RunId,
+        (Split-Path -Leaf $RunDirectory),
+        [StringComparison]::OrdinalIgnoreCase)
+    $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    $commandLine = if ($null -ne $processInfo) { [string]$processInfo.CommandLine } else { "" }
+    $prefix = [string]$parameters.ObjectPrefix
+    $commandMatches = -not [string]::IsNullOrWhiteSpace($prefix) -and
+        $commandLine -match "Invoke-DirectoryObjectStoreLongevity\.ps1" -and
+        $commandLine.IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    if ($commandLine -match "(?i)-ResumeRunDirectory")
+    {
+        $commandMatches = $commandMatches -and
+            $commandLine.IndexOf($RunDirectory, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    }
+    $processIdentityVerified =
+        $startTimeMatches -and
+        $statusPidMatches -and
+        $statusTimeMatches -and
+        $runIdMatches -and
+        $commandMatches
 }
 $summaryCandidate = if ($null -eq $process -and (Test-Path -LiteralPath $summaryPath))
 {
@@ -150,14 +191,32 @@ $artifactProgress = @(
 )
 $statusIsFresh = $null -ne $status -and
     ($ResumeStartedUtc -le [datetime]::MinValue -or [datetime]$status.UpdatedUtc -ge $ResumeStartedUtc)
+$operatingSystem = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+$freePhysicalMemoryBytes = if ($null -ne $operatingSystem)
+{
+    [long]$operatingSystem.FreePhysicalMemory * 1KB
+}
+else
+{
+    $null
+}
+$largestWinRmShell = Get-Process -Name "wsmprovhost" -ErrorAction SilentlyContinue |
+    Sort-Object PrivateMemorySize64 -Descending |
+    Select-Object -First 1
 
 [ordered]@{
     UtcNow = $now.ToString("o")
     ProcessRunning = $null -ne $process
     ProcessId = if ($null -ne $process) { $process.Id } else { $ProcessId }
+    ProcessIdentityVerified = $processIdentityVerified
+    ProcessStartUtc = if ($null -ne $process) { $process.StartTime.ToUniversalTime().ToString("o") } else { $null }
+    ProcessEndUtc = if ($null -eq $process -and $null -ne $summary) { [string]$summary.FinishedUtc } else { $null }
+    ProcessExitCode = $null
     CpuSeconds = if ($null -ne $process) { $process.CPU } else { $null }
+    PrivateMemoryBytes = if ($null -ne $process) { $process.PrivateMemorySize64 } else { $null }
     Status = $status
     StatusIsFresh = $statusIsFresh
+    LastSuccessfulStatusUtc = if ($statusIsFresh) { [string]$status.UpdatedUtc } else { $null }
     TerminalSummary = $summary
     StaleSummaryIgnored = $null -ne $summaryCandidate -and -not $summaryIsFresh
     PausedMarkerPresent = Test-Path -LiteralPath $pausedPath
@@ -166,5 +225,17 @@ $statusIsFresh = $null -ne $status -and
     Services = $services
     Port83Listening = $port83Listening
     Port6092Listening = $port6092Listening
+    FreePhysicalMemoryBytes = $freePhysicalMemoryBytes
+    LargestWinRmShell = if ($null -ne $largestWinRmShell)
+    {
+        [ordered]@{
+            ProcessId = $largestWinRmShell.Id
+            PrivateMemoryBytes = $largestWinRmShell.PrivateMemorySize64
+        }
+    }
+    else
+    {
+        $null
+    }
     ArtifactProgress = $artifactProgress
 } | ConvertTo-Json -Depth 10 -Compress

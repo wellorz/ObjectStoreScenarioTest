@@ -2667,6 +2667,39 @@ Every report includes:
 - service, port, watermark, host-memory, and monitor health;
 - current reporting interval.
 
+The first report after launch uses the same complete shape as recurring
+reports. Do not replace it with a short `started` message containing only PID,
+prefix, population, batch count, and run directory.
+
+The harness writes a run-bound `Starting` status snapshot before preflight.
+The monitor waits up to 60 seconds for that snapshot to match the launched PID,
+run ID, and process start time. It persists the verified PID/start pair so a
+terminal report can say `previously verified` after the process exits without
+confusing it with PID reuse.
+
+```text
+Report time: <local ISO-8601 timestamp with UTC offset> / <UTC ISO-8601 timestamp>
+• Run: <run-id>
+• Process: PID <pid>, identity <verified/previously verified/unverified>, <running/exited>; started <UTC>; ended <active/UTC/unknown>; exit <active/code/unknown>; CPU <seconds/unknown>; private memory <MB/unknown>
+• Stage: <preflight/qualification/population/phase>, <batch if active>, <mutation/wait/comparison/terminal stage>
+• Population: <contacts>/<target> contacts; <groups>/<target> groups; <new/reused/replacement generation>
+• Operations/writes: <succeeded> succeeded, <failed or historical failures>; <current failure state>
+• Scenario batches: <completed>/<total>; <active mutation and comparison progress>
+• Validations: <passed> passed, <failed> failed; <pending comparisons>
+• Data consistency: <consistent through exact phase/batch / inconsistent GUIDs / not checked / unknown>
+• Timing statistics: <completed batch durations and phase total, or not available yet>
+• Latest progress: <latest meaningful operation or artifact activity>
+• Errors: <none current or concise errors>; stderr <empty/non-empty> and `PAUSED` marker <absent/present>
+• TDS health: Directory Cache=<state>, OLS=<state>, Directory Proxy=<state>; ports 83=<state> and 6092=<state>
+• Side-A sync watermarks: Recipients <UTC/unknown>, Links <UTC/unknown>, TenantConfig <UTC/unknown>; delay <values/unknown>
+• Memory health: Scenario process <MB/unknown>; host free physical memory <GB/unknown>; largest WinRM shell <MB/unknown>
+• Monitor health: <healthy/degraded/failed> under schedule #<id/unknown>; last successful status <UTC/unknown>; <stall assessment>
+• Report interval: <two/five/user-requested> minutes; <reason>
+```
+
+Never omit a template line. Use `unknown` or `not available yet` when the run
+has not produced that value.
+
 Use the bounded status helper:
 
 ```powershell

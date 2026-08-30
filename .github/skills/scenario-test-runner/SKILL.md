@@ -263,7 +263,7 @@ confirmation of the selected command, generated prefix, default side `A`,
 destination `Test`, random seed `1729`, default `Full` set mode, or default
 reporting intervals.
 
-Before starting, tell the user:
+Before launching, give this estimate announcement:
 
 ```text
 Command: <command>
@@ -278,6 +278,22 @@ Object prefix: <automatically-generated-prefix>
 Monitoring: every 2 minutes for the first 10 traffic minutes, then every
 5 minutes while healthy.
 ```
+
+This announcement is not the initial progress report. Immediately after the
+process starts, create the monitoring schedule, collect the full status, and
+emit the complete progress-report template below. Never replace the initial
+report with a minimal `RunAll Full started` message or a short PID/prefix/run
+directory list.
+
+Before the initial report, poll for the run's first `status.json` snapshot for
+up to 60 seconds. It must identify the launched PID and run ID and be newer
+than the process start time. The harness publishes this snapshot with status
+`Starting` before preflight begins. Once identity verifies, persist the exact
+PID, process start time, and verification timestamp in session state.
+
+After process exit, report identity as `previously verified` only when the
+terminal run uses that exact persisted PID/start pair. Never transfer a prior
+verification to a reused PID or another run.
 
 If the user specifies a reporting interval, use their requested interval
 instead. If they specify separate initial and steady-state intervals, use both.
@@ -382,6 +398,9 @@ small state record in the agent's session-artifact area. Track at least:
 - `remoteRunDirectory`
 - `processId`
 - `processStartUtc`
+- `lastVerifiedProcessId`
+- `lastVerifiedProcessStartUtc`
+- `lastIdentityVerifiedAtUtc`
 - `stdoutPath`
 - `stderrPath`
 - `startedAtUtc`
@@ -932,25 +951,28 @@ List the minimum deterministic steps needed to reproduce the problem manually. I
 ```text
 Report time: <local ISO-8601 timestamp with UTC offset> / <UTC ISO-8601 timestamp>
 • Run: <run-id>
-• Process: PID <pid>, identity <verified/unverified>, <running/exited>; CPU <seconds/unknown>
-• Stage: <preflight/bootstrap population/phase and batch/cleanup/terminal>
-• Bootstrap: <contacts>/<target> contacts and <groups>/<target> groups created successfully
-• Operations/writes: <succeeded> succeeded, <failed> failed
-• Scenario batches: <completed>/<ScenarioBatchTotal>; <phase>, batch <index>, <stage>;
-  mutations <attempted>/<total>; comparisons <terminal>/<total>
-• Validations: <state and counts>; data consistency: <consistent/inconsistent/not checked/unknown>
+• Process: PID <pid>, identity <verified/previously verified/unverified>, <running/exited>; started <UTC>; ended <active/UTC/unknown>; exit <active/code/unknown>; CPU <seconds/unknown>; private memory <MB/unknown>
+• Stage: <preflight/qualification/population/phase>, <batch if active>, <mutation/wait/comparison/terminal stage>
+• Population: <contacts>/<target> contacts; <groups>/<target> groups; <new/reused/replacement generation>
+• Operations/writes: <succeeded> succeeded, <failed or historical failures>; <current failure state>
+• Scenario batches: <completed>/<ScenarioBatchTotal>; <active mutation and comparison progress>
+• Validations: <passed> passed, <failed> failed; <pending comparisons>
+• Data consistency: <consistent through exact phase/batch / inconsistent GUIDs / not checked / unknown>
+• Timing statistics: <completed B0/B1/B2/B3 durations and phase total, or not available yet>
 • Latest progress: <latest meaningful operation or artifact activity>
-• Errors: <none or concise new errors>; stderr <empty/non-empty> and terminal marker <absent/present>
+• Errors: <none current or concise new errors>; stderr <empty/non-empty> and `PAUSED` marker <absent/present>
 • TDS health: Directory Cache=<state>, OLS=<state>, Directory Proxy=<state>; ports 83=<state> and 6092=<state>
 • Side-A sync watermarks: Recipients <UTC/unknown>, Links <UTC/unknown>, TenantConfig <UTC/unknown>; delay <values/unknown>
-• Monitor health: <healthy/degraded/failed>; <stall assessment>
-• Report interval: <2 or 5> minutes; <reason>
+• Memory health: Scenario process <MB/unknown>; host free physical memory <GB/unknown>; largest WinRM shell <MB/unknown>
+• Monitor health: <healthy/degraded/failed> under schedule #<id/unknown>; last successful status <UTC/unknown>; <stall assessment>
+• Report interval: <two/five/user-requested> minutes; <reason>
 ```
 
-Prefer this concise shape over dumping every tracked field. Include extra
-failure, mismatch, correlation, or evidence lines only when they add actionable
-information. When a value is unavailable, say `unknown` rather than omitting a
-required field or inferring success.
+Use every line for the initial, recurring, post-repair, resume, and terminal
+reports. Include extra failure, mismatch, correlation, or evidence lines only
+when they add actionable information. When a value is unavailable, say
+`unknown` or `not available yet` rather than omitting a required line or
+inferring success.
 
 Derive bootstrap progress from the exact run prefix and organization, not from
 tenant-wide totals. During bootstrap, the operation count should equal
@@ -963,6 +985,9 @@ elapsed traffic time. Remain at two minutes until at least ten minutes after
 that event; preflight duration does not count toward the observation window.
 
 ### Repair report
+
+Append these repair-specific lines after the complete progress report above;
+they never replace any mandatory progress-report line.
 
 ```text
 [ScenarioTest script repair]
@@ -978,6 +1003,9 @@ Resume decision: <decision and reason>
 ```
 
 ### Stop and manual repro report
+
+Append these stop/repro-specific lines after the complete terminal progress
+report above; they never replace any mandatory progress-report line.
 
 ```text
 [ScenarioTest stopped]
@@ -1001,4 +1029,10 @@ Mark the run complete only when one of these is true:
 - traffic is stopped and a complete manual repro package is produced for a non-script, non-preflight failure; or
 - execution is safely blocked because a required command or prerequisite is missing, with the exact blocker and evidence reported.
 
-At completion, provide a concise summary of preflight outcome, traffic duration, interval transitions, failures, repairs, validations, cleanups, final data-consistency status and evidence, final traffic status, changed files, and evidence locations. A run must not be declared successful unless the documented final consistency check is `consistent`, or `ScenarioTest.md` explicitly states that no consistency check applies.
+At completion, first emit the complete terminal progress report. Then append a
+concise summary of preflight outcome, traffic duration, interval transitions,
+failures, repairs, validations, cleanups, final data-consistency status and
+evidence, final traffic status, changed files, and evidence locations. A run
+must not be declared successful unless the documented final consistency check
+is `consistent`, or `ScenarioTest.md` explicitly states that no consistency
+check applies.

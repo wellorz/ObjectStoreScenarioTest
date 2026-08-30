@@ -6348,6 +6348,7 @@ function Get-ScenarioCommandOutput
     $queryStatus = "Failed"
     try
     {
+        Write-RunStatusSnapshot -Status "Starting"
         if ($WorkloadMode -eq "ScenarioTest")
         {
             Write-RunEvent -Level "Information" -Message "Starting ScenarioTest target-pool query." -Data @{
