@@ -109,6 +109,10 @@ The complete operating guide is:
 .github\skills\scenario-test-runner\README.md
 ```
 
+That guide includes the
+[scenario-by-scenario LDAP operation and attribute lists](.github/skills/scenario-test-runner/README.md#ldap-operations-and-scenario-attribute-coverage),
+grouped by `Set-ADObject -Replace`, `-Add`, `-Clear`, and `-Remove`.
+
 ## Prerequisites
 
 - A dedicated Windows TDS Exchange machine.
