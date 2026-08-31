@@ -21,7 +21,7 @@ Users can invoke the skill with one of these exact command names:
 | `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 5 minutes | 75 minutes |
 | `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | 10 minutes | 80 minutes |
 | `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 10 minutes | 95 minutes |
-| `Run-All-Scenarios` | All 12 scenarios in canonical order | 25 minutes | 305 minutes |
+| `Run-All-Scenarios` | All 12 scenarios in canonical order | 30 minutes | 305 minutes |
 
 Mandatory overhead estimates:
 
@@ -30,13 +30,18 @@ Mandatory overhead estimates:
 - population creation and validation: measured 11m 42s, estimated 15 minutes
   only when no compatible shared population exists.
 
-| Command | Mini reused | Mini first | Full reused | Full first |
+The total-duration columns combine the scenario set mode with whether an
+existing compatible shared population can be reused. `New population` includes
+the 15-minute population estimate; these columns do not refer to scenario
+batch numbers.
+
+| Command | Mini-set, reused population | Mini-set, new population | Full, reused population | Full, new population |
 | --- | ---: | ---: | ---: | ---: |
 | `User-Upsert` | 15 min | 30 min | 70 min | 85 min |
 | `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
 | `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
 | `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
-| `Run-All-Scenarios` | 35 min | 50 min | 315 min | 330 min |
+| `Run-All-Scenarios` | 40 min | 55 min | 315 min | 330 min |
 
 ## Set modes
 
@@ -2497,7 +2502,7 @@ on the TDS machine:
     -ScenarioRuntimeDependencyRoot C:\tds\RuntimeDependencies\net472
 ```
 
-Omit `-PopulationSourceRunDirectory` for the first population on a TDS.
+Omit `-PopulationSourceRunDirectory` when creating a new population on a TDS.
 Replace `User-Upsert` with any command from the table. When Copilot runs the
 skill, it automatically generates a unique `ObjectPrefix` from the command,
 UTC timestamp, and a six-character GUID suffix, for example:
@@ -2544,11 +2549,11 @@ minutes:
 - `Group-Upsert`: 5 minutes mini-set, 75 minutes full;
 - `User-Properties-Deletion`: 10 minutes mini-set, 80 minutes full;
 - `Group-Properties-Deletion`: 10 minutes mini-set, 95 minutes full;
-- `Run-All-Scenarios`: 25 minutes mini-set, 305 minutes full.
+- `Run-All-Scenarios`: 30 minutes mini-set, 305 minutes full.
 
-Every first command on a TDS creates the complete shared population of 235
-contacts and 267 groups. Later compatible commands reuse that population by
-passing the prior successful run directory through
+When no compatible population exists, the command creates the complete shared
+population of 235 contacts and 267 groups. Later compatible commands reuse that
+population by passing the prior successful run directory through
 `-PopulationSourceRunDirectory`. Only the population ledger is imported; each
 command gets a new run directory, checkpoint, phase plan, counters, and logs.
 

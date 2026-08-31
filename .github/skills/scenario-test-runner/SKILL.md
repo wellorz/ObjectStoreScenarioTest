@@ -19,7 +19,7 @@ the corresponding ScenarioTest subset:
 | `Group-Upsert` | Pure Group Recipient Upsert; Pure Group Link Upsert; Mixed Group Upsert | 5 minutes | 75 minutes |
 | `User-Properties-Deletion` | Pure User Recipient Deletion; Pure User Link Deletion; Mixed User Deletion | 10 minutes | 80 minutes |
 | `Group-Properties-Deletion` | Pure Group Recipient Deletion; Pure Group Link Deletion; Mixed Group Deletion | 10 minutes | 95 minutes |
-| `Run-All-Scenarios` | All 12 scenarios in canonical order | 25 minutes | 305 minutes |
+| `Run-All-Scenarios` | All 12 scenarios in canonical order | 30 minutes | 305 minutes |
 
 Treat `RunAll` only as a legacy persisted value when resuming an existing run;
 do not expose or accept it as a new user-facing command.
@@ -33,13 +33,16 @@ Add these mandatory stage estimates:
 
 Total estimates:
 
-| Command | Mini-set, reused population | Mini-set, first population | Full, reused population | Full, first population |
+These columns combine the scenario set mode with whether the compatible shared
+population is reused or newly created; they do not refer to batch numbers.
+
+| Command | Mini-set, reused population | Mini-set, new population | Full, reused population | Full, new population |
 | --- | ---: | ---: | ---: | ---: |
 | `User-Upsert` | 15 min | 30 min | 70 min | 85 min |
 | `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
 | `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
 | `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
-| `Run-All-Scenarios` | 35 min | 50 min | 315 min | 330 min |
+| `Run-All-Scenarios` | 40 min | 55 min | 315 min | 330 min |
 
 Each command accepts one optional mode modifier:
 
@@ -200,7 +203,7 @@ $ObjectPrefix = "DOS$commandCode-$([datetime]::UtcNow.ToString('MMddHHmmss'))-$(
 
 The generated value satisfies the harness's 3-32 character constraint. A new
 population always creates the complete shared pool of 235 contacts and 267
-groups, regardless of which command runs first. Report the prefix and whether
+groups, regardless of which command creates it. Report the prefix and whether
 the population is new or reused, but do not ask the user to approve or edit
 either choice.
 

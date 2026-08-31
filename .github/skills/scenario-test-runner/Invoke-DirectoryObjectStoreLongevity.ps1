@@ -1478,7 +1478,7 @@ function Get-ScenarioCommandDefinition
         default {
             return [ordered]@{
                 FullEstimatedMinutes = 305
-                MiniSetEstimatedMinutes = 25
+                MiniSetEstimatedMinutes = 30
                 PhaseNames = @(
                     "Pure User Recipient Upsert",
                     "Pure User Link Upsert",

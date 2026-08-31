@@ -12,13 +12,18 @@ does not contain duplicate harness, status, contract, or skill files.
 
 ## Commands
 
-| Command | Mini reused | Mini first | Full reused | Full first |
+The duration columns combine the scenario set mode with whether an existing
+compatible shared population can be reused. `New population` includes the
+additional 15 minutes needed to create and validate 235 contacts and 267
+groups; these columns do not refer to scenario batch numbers.
+
+| Command | Mini-set, reused population | Mini-set, new population | Full, reused population | Full, new population |
 | --- | ---: | ---: | ---: | ---: |
 | `User-Upsert` | 15 min | 30 min | 70 min | 85 min |
 | `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
 | `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
 | `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
-| `Run-All-Scenarios` | 35 min | 50 min | 315 min | 330 min |
+| `Run-All-Scenarios` | 40 min | 55 min | 315 min | 330 min |
 
 Commands default to `--full`, which runs all four batches per phase. Add
 `--miniSet` to run only the initial batch for each phase:
@@ -34,10 +39,11 @@ Use `--full` explicitly when desired:
 Group-Upsert --full
 ```
 
-Every estimate includes a mandatory 10-minute preflight estimate. A first run
-also includes 15 minutes to create and validate the shared 235-contact and
-267-group population. Later compatible commands reuse it. All stage estimates
-are based on measured timings and rounded upward to the next five minutes.
+Every estimate includes a mandatory 10-minute preflight estimate. A run without
+a compatible shared population includes another 15 minutes to create and
+validate 235 contacts and 267 groups. Later compatible commands reuse that
+population. All stage estimates are based on measured timings and rounded
+upward to the next five minutes.
 
 ## Install
 
