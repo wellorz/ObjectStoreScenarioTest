@@ -12,18 +12,13 @@ does not contain duplicate harness, status, contract, or skill files.
 
 ## Commands
 
-The duration columns combine the scenario set mode with whether an existing
-compatible shared population can be reused. `New population` includes the
-additional 15 minutes needed to create and validate 235 contacts and 267
-groups; these columns do not refer to scenario batch numbers.
-
-| Command | Mini-set, reused population | Mini-set, new population | Full, reused population | Full, new population |
-| --- | ---: | ---: | ---: | ---: |
-| `User-Upsert` | 15 min | 30 min | 70 min | 85 min |
-| `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
-| `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
-| `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
-| `Run-All-Scenarios` | 40 min | 55 min | 315 min | 330 min |
+| Command | Scenarios | `--miniSet` scenario | `--full` scenario |
+| --- | --- | ---: | ---: |
+| `User-Upsert` | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert | 5 minutes | 60 minutes |
+| `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 5 minutes | 75 minutes |
+| `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | 10 minutes | 80 minutes |
+| `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 10 minutes | 95 minutes |
+| `Run-All-Scenarios` | All 12 scenarios in canonical order | 30 minutes | 305 minutes |
 
 Commands default to `--full`, which runs all four batches per phase. Add
 `--miniSet` to run only the initial batch for each phase:
@@ -39,11 +34,9 @@ Use `--full` explicitly when desired:
 Group-Upsert --full
 ```
 
-Every estimate includes a mandatory 10-minute preflight estimate. A run without
-a compatible shared population includes another 15 minutes to create and
-validate 235 contacts and 267 groups. Later compatible commands reuse that
-population. All stage estimates are based on measured timings and rounded
-upward to the next five minutes.
+The table shows scenario execution time only. Add 10 minutes for mandatory
+preflight and qualification. When no compatible shared population exists, add
+another 15 minutes to create and validate 235 contacts and 267 groups.
 
 ## Install
 
