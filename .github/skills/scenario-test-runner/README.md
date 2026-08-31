@@ -8,6 +8,9 @@ The primary interface is the five `ScenarioCommand` values below. Legacy
 `AttributeCoverage` and time-based `Longevity` modes remain available for
 advanced use.
 
+Existing run artifacts that stored the former `RunAll` command name remain
+resumable through `Run-All-Scenarios`.
+
 ## Shared commands
 
 Users can invoke the skill with one of these exact command names:
@@ -18,7 +21,7 @@ Users can invoke the skill with one of these exact command names:
 | `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 5 minutes | 75 minutes |
 | `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | 10 minutes | 80 minutes |
 | `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 10 minutes | 95 minutes |
-| `RunAll` | All 12 scenarios in canonical order | 25 minutes | 305 minutes |
+| `Run-All-Scenarios` | All 12 scenarios in canonical order | 25 minutes | 305 minutes |
 
 Mandatory overhead estimates:
 
@@ -33,7 +36,7 @@ Mandatory overhead estimates:
 | `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
 | `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
 | `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
-| `RunAll` | 35 min | 50 min | 315 min | 330 min |
+| `Run-All-Scenarios` | 35 min | 50 min | 315 min | 330 min |
 
 ## Set modes
 
@@ -48,10 +51,10 @@ Examples:
 User-Upsert
 User-Upsert --full
 User-Upsert --miniSet
-RunAll --miniSet
+Run-All-Scenarios --miniSet
 ```
 
-| Mode | Subset command | `RunAll` |
+| Mode | Subset command | `Run-All-Scenarios` |
 | --- | ---: | ---: |
 | `--full` or omitted | 12 batches | 48 batches |
 | `--miniSet` | 3 batches | 12 batches |
@@ -2541,7 +2544,7 @@ minutes:
 - `Group-Upsert`: 5 minutes mini-set, 75 minutes full;
 - `User-Properties-Deletion`: 10 minutes mini-set, 80 minutes full;
 - `Group-Properties-Deletion`: 10 minutes mini-set, 95 minutes full;
-- `RunAll`: 25 minutes mini-set, 305 minutes full.
+- `Run-All-Scenarios`: 25 minutes mini-set, 305 minutes full.
 
 Every first command on a TDS creates the complete shared population of 235
 contacts and 267 groups. Later compatible commands reuse that population by
@@ -2624,8 +2627,8 @@ Qualification covers only the phases selected by `ScenarioCommand`:
 
 - Full subset command: 3 phases and 12 batches;
 - Mini-set subset command: 3 phases and 3 batches;
-- Full `RunAll`: 12 phases and 48 batches;
-- Mini-set `RunAll`: 12 phases and 12 batches.
+- Full `Run-All-Scenarios`: 12 phases and 48 batches;
+- Mini-set `Run-All-Scenarios`: 12 phases and 12 batches.
 
 Scenario traffic starts only after qualification reports zero defects.
 
@@ -2897,7 +2900,7 @@ User-Upsert
 Group-Upsert
 User-Properties-Deletion
 Group-Properties-Deletion
-RunAll
+Run-All-Scenarios
 ```
 
 This directory is the single source of truth for the skill. Edit these files

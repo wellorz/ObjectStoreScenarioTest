@@ -5,8 +5,8 @@ param(
     [ValidateSet("AttributeCoverage", "Longevity", "ScenarioTest")]
     [string] $WorkloadMode = "AttributeCoverage",
 
-    [ValidateSet("User-Upsert", "Group-Upsert", "User-Properties-Deletion", "Group-Properties-Deletion", "RunAll")]
-    [string] $ScenarioCommand = "RunAll",
+    [ValidateSet("User-Upsert", "Group-Upsert", "User-Properties-Deletion", "Group-Properties-Deletion", "Run-All-Scenarios")]
+    [string] $ScenarioCommand = "Run-All-Scenarios",
 
     [ValidateSet("Full", "MiniSet")]
     [string] $ScenarioSetMode = "Full",
@@ -1419,6 +1419,18 @@ function Initialize-ScenarioCounts
 
 Initialize-ScenarioCounts
 
+function ConvertTo-CurrentScenarioCommandName
+{
+    param([AllowNull()] [string] $Value)
+
+    if ([string]::Equals($Value, "RunAll", [StringComparison]::OrdinalIgnoreCase))
+    {
+        return "Run-All-Scenarios"
+    }
+
+    return $Value
+}
+
 function Get-ScenarioCommandDefinition
 {
     switch ($ScenarioCommand)
@@ -2461,8 +2473,8 @@ function Restore-Checkpoint
         if ($checkpointSharedPopulationVersion -eq 0)
         {
             $script:LegacyCommandSpecificPopulation = $true
-            $legacyIncludesUsers = $ScenarioCommand -in @("User-Upsert", "User-Properties-Deletion", "RunAll")
-            $legacyIncludesGroups = $ScenarioCommand -in @("Group-Upsert", "Group-Properties-Deletion", "RunAll")
+            $legacyIncludesUsers = $ScenarioCommand -in @("User-Upsert", "User-Properties-Deletion", "Run-All-Scenarios")
+            $legacyIncludesGroups = $ScenarioCommand -in @("Group-Upsert", "Group-Properties-Deletion", "Run-All-Scenarios")
             $script:ScenarioCounts.N_User =
                 if ($legacyIncludesUsers)
                 {
@@ -2506,11 +2518,11 @@ function Restore-Checkpoint
         $checkpointScenarioCommand =
             if ($state.PSObject.Properties.Name -contains "ScenarioCommand")
             {
-                [string]$state.ScenarioCommand
+                ConvertTo-CurrentScenarioCommandName -Value ([string]$state.ScenarioCommand)
             }
             else
             {
-                "RunAll"
+                "Run-All-Scenarios"
             }
         if (-not [string]::Equals($checkpointScenarioCommand, $ScenarioCommand, [StringComparison]::OrdinalIgnoreCase))
         {
@@ -2718,11 +2730,11 @@ function Assert-ScenarioResumeParameters
         if ($savedPropertyNames -contains "ScenarioCommand" -and
             -not [string]::IsNullOrWhiteSpace([string]$saved.ScenarioCommand))
         {
-            [string]$saved.ScenarioCommand
+            ConvertTo-CurrentScenarioCommandName -Value ([string]$saved.ScenarioCommand)
         }
         else
         {
-            "RunAll"
+            "Run-All-Scenarios"
         }
     $savedScenarioSetMode =
         if ($savedPropertyNames -contains "ScenarioSetMode" -and
@@ -7622,7 +7634,8 @@ function Get-ScenarioQualificationFingerprint
 {
     param(
         [switch] $LegacyWithoutScenarioSetMode,
-        [switch] $LegacyWithoutPopulationSource)
+        [switch] $LegacyWithoutPopulationSource,
+        [switch] $LegacyRunAllCommandName)
 
     if ($script:LegacyCommandSpecificPopulation)
     {
@@ -7645,7 +7658,15 @@ function Get-ScenarioQualificationFingerprint
     $fingerprintInput = [ordered]@{
         PlanVersion = $script:ScenarioPlanVersion
         BatchesPerPhase = $script:ScenarioBatchesPerPhase
-        ScenarioCommand = $ScenarioCommand.ToUpperInvariant()
+        ScenarioCommand =
+            if ($LegacyRunAllCommandName)
+            {
+                "RUNALL"
+            }
+            else
+            {
+                $ScenarioCommand.ToUpperInvariant()
+            }
     }
     if (-not $LegacyWithoutScenarioSetMode)
     {
@@ -8057,7 +8078,9 @@ function Get-ScenarioQualificationStatus
     {
         $mismatches.Add("batches per phase")
     }
-    if (-not [string]::Equals([string]$qualification.ScenarioCommand, $ScenarioCommand, [StringComparison]::OrdinalIgnoreCase))
+    $qualificationScenarioCommand =
+        ConvertTo-CurrentScenarioCommandName -Value ([string]$qualification.ScenarioCommand)
+    if (-not [string]::Equals($qualificationScenarioCommand, $ScenarioCommand, [StringComparison]::OrdinalIgnoreCase))
     {
         $mismatches.Add("scenario command")
     }
@@ -8102,6 +8125,13 @@ function Get-ScenarioQualificationStatus
         $propertyNames -notcontains "PopulationSourceRunDirectory")
     {
         $fingerprintParameters["LegacyWithoutPopulationSource"] = $true
+    }
+    if ([string]::Equals(
+        [string]$qualification.ScenarioCommand,
+        "RunAll",
+        [StringComparison]::OrdinalIgnoreCase))
+    {
+        $fingerprintParameters["LegacyRunAllCommandName"] = $true
     }
     $expectedQualificationFingerprint = Get-ScenarioQualificationFingerprint @fingerprintParameters
     if (-not [string]::Equals(

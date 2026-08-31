@@ -56,14 +56,14 @@ The harness supports these command subsets:
 - `Group-Upsert`: Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert.
 - `User-Properties-Deletion`: Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion.
 - `Group-Properties-Deletion`: Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion.
-- `RunAll`: all 12 phases in canonical order.
+- `Run-All-Scenarios`: all 12 phases in canonical order.
 
 The scenario set mode controls batches per selected phase:
 
 - `Full` is the default and runs batch 0 plus repetitions 1-3: four batches per
-  phase, 12 for a subset command, and 48 for `RunAll`.
+  phase, 12 for a subset command, and 48 for `Run-All-Scenarios`.
 - `MiniSet` runs only batch 0: one batch per phase, 3 for a subset command, and
-  12 for `RunAll`.
+  12 for `Run-All-Scenarios`.
 
 Persist the command and set mode in the checkpoint and reject a resume
 requested with a different command or mode. Mini-set mode preserves the full

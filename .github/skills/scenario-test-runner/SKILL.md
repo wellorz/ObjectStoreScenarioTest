@@ -1,6 +1,6 @@
 ---
 name: scenario-test-runner
-description: Run User-Upsert, Group-Upsert, User-Properties-Deletion, Group-Properties-Deletion, or RunAll Directory Object Store scenarios. Supports start, resume, monitoring, diagnosis, repair, timing reports, and repro packages with adaptive bounded-memory reporting.
+description: Run User-Upsert, Group-Upsert, User-Properties-Deletion, Group-Properties-Deletion, or Run-All-Scenarios Directory Object Store scenarios. Supports start, resume, monitoring, diagnosis, repair, timing reports, and repro packages with adaptive bounded-memory reporting.
 ---
 
 # Scenario Test Runner
@@ -19,7 +19,10 @@ the corresponding ScenarioTest subset:
 | `Group-Upsert` | Pure Group Recipient Upsert; Pure Group Link Upsert; Mixed Group Upsert | 5 minutes | 75 minutes |
 | `User-Properties-Deletion` | Pure User Recipient Deletion; Pure User Link Deletion; Mixed User Deletion | 10 minutes | 80 minutes |
 | `Group-Properties-Deletion` | Pure Group Recipient Deletion; Pure Group Link Deletion; Mixed Group Deletion | 10 minutes | 95 minutes |
-| `RunAll` | All 12 scenarios in canonical order | 25 minutes | 305 minutes |
+| `Run-All-Scenarios` | All 12 scenarios in canonical order | 25 minutes | 305 minutes |
+
+Treat `RunAll` only as a legacy persisted value when resuming an existing run;
+do not expose or accept it as a new user-facing command.
 
 Add these mandatory stage estimates:
 
@@ -36,7 +39,7 @@ Total estimates:
 | `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
 | `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
 | `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
-| `RunAll` | 35 min | 50 min | 315 min | 330 min |
+| `Run-All-Scenarios` | 35 min | 50 min | 315 min | 330 min |
 
 Each command accepts one optional mode modifier:
 
@@ -52,7 +55,7 @@ Examples:
 User-Upsert
 User-Upsert --full
 User-Upsert --miniSet
-RunAll --miniSet
+Run-All-Scenarios --miniSet
 ```
 
 Map the modifier to the harness:
@@ -190,7 +193,7 @@ $commandCode = @{
     "Group-Upsert" = "GU"
     "User-Properties-Deletion" = "UD"
     "Group-Properties-Deletion" = "GD"
-    "RunAll" = "RA"
+    "Run-All-Scenarios" = "RA"
 }[$ScenarioCommand]
 $ObjectPrefix = "DOS$commandCode-$([datetime]::UtcNow.ToString('MMddHHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0, 6))"
 ```
@@ -282,7 +285,7 @@ Monitoring: every 2 minutes for the first 10 traffic minutes, then every
 This announcement is not the initial progress report. Immediately after the
 process starts, create the monitoring schedule, collect the full status, and
 emit the complete progress-report template below. Never replace the initial
-report with a minimal `RunAll Full started` message or a short PID/prefix/run
+report with a minimal `Run-All-Scenarios Full started` message or a short PID/prefix/run
 directory list.
 
 Before the initial report, poll for the run's first `status.json` snapshot for
@@ -305,8 +308,8 @@ Mode-specific totals:
 
 - subset command with `Full`: 12 batches;
 - subset command with `MiniSet`: 3 batches;
-- `RunAll --full` or plain `RunAll`: 48 batches;
-- `RunAll --miniSet`: 12 batches.
+- `Run-All-Scenarios --full` or plain `Run-All-Scenarios`: 48 batches;
+- `Run-All-Scenarios --miniSet`: 12 batches.
 
 The estimates come from measured stage timings and are rounded upward to the
 next five minutes. Preflight is mandatory for every new command. Population
