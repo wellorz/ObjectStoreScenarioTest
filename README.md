@@ -18,14 +18,14 @@ does not contain duplicate harness, status, contract, or skill files.
 | `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
 | `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
 | `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
-| `RunAll` | 35 min | 50 min | 315 min | 330 min |
+| `Run-All-Scenarios` | 35 min | 50 min | 315 min | 330 min |
 
 Commands default to `--full`, which runs all four batches per phase. Add
 `--miniSet` to run only the initial batch for each phase:
 
 ```text
 User-Upsert --miniSet
-RunAll --miniSet
+Run-All-Scenarios --miniSet
 ```
 
 Use `--full` explicitly when desired:
@@ -87,7 +87,7 @@ Always copy the entire directory, not only `SKILL.md`.
 After installation, ask Copilot to run one of the five commands, for example:
 
 ```text
-User-Upsert on SG2TDSO3000036 for contoso.com
+User-Upsert on SG2TDSO3000036
 ```
 
 The skill announces the selected scenarios, expected population, estimated
