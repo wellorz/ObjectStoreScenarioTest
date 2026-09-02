@@ -8,20 +8,21 @@ The primary interface is the five `ScenarioCommand` values below. Legacy
 `AttributeCoverage` and time-based `Longevity` modes remain available for
 advanced use.
 
-Existing run artifacts that stored the former `RunAll` command name remain
-resumable through `Run-All-Scenarios`.
+Existing run artifacts that stored the former `RunAll` or
+`Run-All-Scenarios` command names remain resumable through
+`Run-All-OBScenarios`.
 
 ## Shared commands
 
 Users can invoke the skill with one of these exact command names:
 
-| Command | Scenarios | `--miniSet` scenario | `--full` scenario |
-| --- | --- | ---: | ---: |
-| `User-Upsert` | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert | 5 minutes | 60 minutes |
-| `Group-Upsert` | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert | 5 minutes | 75 minutes |
-| `User-Properties-Deletion` | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion | 10 minutes | 80 minutes |
-| `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion | 10 minutes | 95 minutes |
-| `Run-All-Scenarios` | All 12 scenarios in canonical order | 30 minutes | 305 minutes |
+| Command                     | Scenarios                                                                     | `--miniSet` scenario | `--full` scenario |
+| :-------------------------- | :---------------------------------------------------------------------------- | -------------------: | ----------------: |
+| `User-Upsert`               | Pure User Recipient Upsert, Pure User Link Upsert, Mixed User Upsert          |            5 minutes |        60 minutes |
+| `Group-Upsert`              | Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert       |            5 minutes |        75 minutes |
+| `User-Properties-Deletion`  | Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion    |           10 minutes |        80 minutes |
+| `Group-Properties-Deletion` | Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion |           10 minutes |        95 minutes |
+| `Run-All-OBScenarios`       | All 12 scenarios in canonical order                                           |           30 minutes |       305 minutes |
 
 Mandatory overhead estimates:
 
@@ -35,13 +36,13 @@ existing compatible shared population can be reused. `New population` includes
 the 15-minute population estimate; these columns do not refer to scenario
 batch numbers.
 
-| Command | Mini-set, reused population | Mini-set, new population | Full, reused population | Full, new population |
-| --- | ---: | ---: | ---: | ---: |
-| `User-Upsert` | 15 min | 30 min | 70 min | 85 min |
-| `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
-| `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
-| `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
-| `Run-All-Scenarios` | 40 min | 55 min | 315 min | 330 min |
+| Command                     | Mini-set, reused population | Mini-set, new population | Full, reused population | Full, new population |
+| :-------------------------- | --------------------------: | -----------------------: | ----------------------: | -------------------: |
+| `User-Upsert`               |                      15 min |                   30 min |                  70 min |               85 min |
+| `Group-Upsert`              |                      15 min |                   30 min |                  85 min |              100 min |
+| `User-Properties-Deletion`  |                      20 min |                   35 min |                  90 min |              105 min |
+| `Group-Properties-Deletion` |                      20 min |                   35 min |                 105 min |              120 min |
+| `Run-All-OBScenarios`       |                      40 min |                   55 min |                 315 min |              330 min |
 
 ## Set modes
 
@@ -56,10 +57,10 @@ Examples:
 User-Upsert
 User-Upsert --full
 User-Upsert --miniSet
-Run-All-Scenarios --miniSet
+Run-All-OBScenarios --miniSet
 ```
 
-| Mode | Subset command | `Run-All-Scenarios` |
+| Mode | Subset command | `Run-All-OBScenarios` |
 | --- | ---: | ---: |
 | `--full` or omitted | 12 batches | 48 batches |
 | `--miniSet` | 3 batches | 12 batches |
@@ -85,12 +86,12 @@ All scenario attribute mutations use `Set-ADObject`. Objects are identified by d
 
 | Scenario | Entity | Attributes | Operations |
 | --- | --- | ---: | --- |
-| Pure User Recipient Upsert | Mail contact | 235 | single `-Replace`; multi `-Add` |
+| Pure User Recipient Upsert | Mail contact | 237 | single `-Replace`; multi `-Add` |
 | Pure User Link Upsert | Mail contact | 33 | single `-Replace`; multi `-Add` |
-| Pure Group Recipient Upsert | Distribution group | 267 | single `-Replace`; multi `-Add` |
-| Pure Group Link Upsert | Distribution group | 45 | single `-Replace`; multi `-Add` |
-| Mixed User Upsert | Mail contact | 235 | single `-Replace`; multi `-Add` |
-| Mixed Group Upsert | Distribution group | 267 | single `-Replace`; multi `-Add` |
+| Pure Group Recipient Upsert | Distribution group | 269 | single `-Replace`; multi `-Add` |
+| Pure Group Link Upsert | Distribution group | 46 | single `-Replace`; multi `-Add` |
+| Mixed User Upsert | Mail contact | 237 | single `-Replace`; multi `-Add` |
+| Mixed Group Upsert | Distribution group | 269 | single `-Replace`; multi `-Add` |
 | Pure User Recipient Deletion | Mail contact | 233 | single `-Clear`; multi `-Remove` or `-Clear` |
 | Pure User Link Deletion | Mail contact | 33 | single `-Clear`; multi `-Remove` or `-Clear` |
 | Pure Group Recipient Deletion | Distribution group | 263 | single `-Clear`; multi `-Remove` or `-Clear` |
@@ -101,11 +102,11 @@ All scenario attribute mutations use `Set-ADObject`. Objects are identified by d
 Deletion first seeds absent selected attributes using the corresponding upsert operation, waits for synchronization, and requires `DataSame`. `msExchCU` and `msExchOURoot` are excluded from deletion. Multivalued `proxyAddresses` is protected and uses value-level `-Remove`, retaining at least one value. Group `description` is intentionally treated as single-valued and uses `-Replace`/`-Clear`.
 
 <details>
-<summary>Pure User Recipient Upsert — 235 LDAP attributes</summary>
+<summary>Pure User Recipient Upsert — 237 LDAP attributes</summary>
 
 Entity: **Mail contact**
 
-#### Set-ADObject -Replace (180)
+#### Set-ADObject -Replace (182)
 
 ```text
 adminDisplayName
@@ -218,6 +219,7 @@ msExchMailboxMoveTargetMDBLink
 msExchMailboxPlanType
 msExchMailboxRelease
 msExchMailboxSecurityDescriptor
+nTSecurityDescriptor
 msExchMasterAccountSid
 msExchMessageHygieneFlags
 msExchMessageHygieneSCLDeleteThreshold
@@ -286,6 +288,7 @@ targetAddress
 telephoneAssistant
 telephoneNumber
 textEncodedORAddress
+thumbnailPhoto
 title
 wWWHomePage
 ```
@@ -403,11 +406,11 @@ unauthOrig
 </details>
 
 <details>
-<summary>Pure Group Recipient Upsert — 267 LDAP attributes</summary>
+<summary>Pure Group Recipient Upsert — 269 LDAP attributes</summary>
 
 Entity: **Distribution group**
 
-#### Set-ADObject -Replace (208)
+#### Set-ADObject -Replace (210)
 
 ```text
 adminDisplayName
@@ -538,6 +541,7 @@ msExchMailboxMoveTargetMDBLink
 msExchMailboxPlanType
 msExchMailboxRelease
 msExchMailboxSecurityDescriptor
+nTSecurityDescriptor
 msExchMailboxTemplateLink
 msExchMasterAccountSid
 msExchMaxBlockedSenders
@@ -617,6 +621,7 @@ submissionContLength
 targetAddress
 telephoneNumber
 textEncodedORAddress
+thumbnailPhoto
 wWWHomePage
 ```
 
@@ -687,7 +692,7 @@ userSMIMECertificate
 </details>
 
 <details>
-<summary>Pure Group Link Upsert — 45 LDAP attributes</summary>
+<summary>Pure Group Link Upsert — 46 LDAP attributes</summary>
 
 Entity: **Distribution group**
 
@@ -720,12 +725,13 @@ msExchUMTemplateLink
 msExchUseOAB
 ```
 
-#### Set-ADObject -Add (21)
+#### Set-ADObject -Add (22)
 
 ```text
 authOrig
 dLMemRejectPerms
 dLMemSubmitPerms
+member
 msExchAdministrativeUnitLink
 msExchApprovalApplicationLink
 msExchBypassModerationFromDLMembersLink
@@ -749,11 +755,11 @@ unauthOrig
 </details>
 
 <details>
-<summary>Mixed User Upsert — 235 LDAP attributes</summary>
+<summary>Mixed User Upsert — 237 LDAP attributes</summary>
 
 Entity: **Mail contact**
 
-#### Set-ADObject -Replace (180)
+#### Set-ADObject -Replace (182)
 
 ```text
 adminDisplayName
@@ -866,6 +872,7 @@ msExchMailboxMoveTargetMDBLink
 msExchMailboxPlanType
 msExchMailboxRelease
 msExchMailboxSecurityDescriptor
+nTSecurityDescriptor
 msExchMasterAccountSid
 msExchMessageHygieneFlags
 msExchMessageHygieneSCLDeleteThreshold
@@ -934,6 +941,7 @@ targetAddress
 telephoneAssistant
 telephoneNumber
 textEncodedORAddress
+thumbnailPhoto
 title
 wWWHomePage
 ```
@@ -1001,11 +1009,11 @@ userSMIMECertificate
 </details>
 
 <details>
-<summary>Mixed Group Upsert — 267 LDAP attributes</summary>
+<summary>Mixed Group Upsert — 269 LDAP attributes</summary>
 
 Entity: **Distribution group**
 
-#### Set-ADObject -Replace (208)
+#### Set-ADObject -Replace (210)
 
 ```text
 adminDisplayName
@@ -1136,6 +1144,7 @@ msExchMailboxMoveTargetMDBLink
 msExchMailboxPlanType
 msExchMailboxRelease
 msExchMailboxSecurityDescriptor
+nTSecurityDescriptor
 msExchMailboxTemplateLink
 msExchMasterAccountSid
 msExchMaxBlockedSenders
@@ -1215,16 +1224,18 @@ submissionContLength
 targetAddress
 telephoneNumber
 textEncodedORAddress
+thumbnailPhoto
 wWWHomePage
 ```
 
-#### Set-ADObject -Add (59)
+#### Set-ADObject -Add (60)
 
 ```text
 AltSecurityIdentities
 authOrig
 dLMemRejectPerms
 dLMemSubmitPerms
+member
 msExchAdministrativeUnitLink
 msExchAlternateMailboxes
 msExchApprovalApplicationLink
@@ -2528,7 +2539,7 @@ Set mode: <Full-or-MiniSet>
 Scenarios: <ordered scenario names>
 Estimated duration: <estimate>
 Time breakdown: preflight <10m>; population <0m reused-or-15m new>; scenario <estimate>
-Population: <reused from run-id-or-235 contacts and 267 groups to create>
+Population: <reused from run-id-or-237 contacts and 269 groups to create>
 Scenario batches: <mode-specific-total>
 Organization: <supplied-or-automatically-selected-organization>
 Object prefix: <automatically-generated-prefix>
@@ -2549,10 +2560,10 @@ minutes:
 - `Group-Upsert`: 5 minutes mini-set, 75 minutes full;
 - `User-Properties-Deletion`: 10 minutes mini-set, 80 minutes full;
 - `Group-Properties-Deletion`: 10 minutes mini-set, 95 minutes full;
-- `Run-All-Scenarios`: 30 minutes mini-set, 305 minutes full.
+- `Run-All-OBScenarios`: 30 minutes mini-set, 305 minutes full.
 
 When no compatible population exists, the command creates the complete shared
-population of 235 contacts and 267 groups. Later compatible commands reuse that
+population of 237 contacts and 269 groups. Later compatible commands reuse that
 population by passing the prior successful run directory through
 `-PopulationSourceRunDirectory`. Only the population ledger is imported; each
 command gets a new run directory, checkpoint, phase plan, counters, and logs.
@@ -2632,8 +2643,8 @@ Qualification covers only the phases selected by `ScenarioCommand`:
 
 - Full subset command: 3 phases and 12 batches;
 - Mini-set subset command: 3 phases and 3 batches;
-- Full `Run-All-Scenarios`: 12 phases and 48 batches;
-- Mini-set `Run-All-Scenarios`: 12 phases and 12 batches.
+- Full `Run-All-OBScenarios`: 12 phases and 48 batches;
+- Mini-set `Run-All-OBScenarios`: 12 phases and 12 batches.
 
 Scenario traffic starts only after qualification reports zero defects.
 
@@ -2744,8 +2755,8 @@ If diagnosis proves a terminal per-object AD/Object Store inconsistency, the
 harness records the affected GUIDs and changes the retry behavior:
 
 - preserve the old objects in a `retired-population-pNN-gNN.json` artifact;
-- create a complete replacement set for that phase's entity kind—235 contacts
-  for a User phase or 267 groups for a Group phase;
+- create a complete replacement set for that phase's entity kind—237 contacts
+  for a User phase or 269 groups for a Group phase;
 - restart that phase from batch 0 with collision-safe generation names;
 - preserve completed earlier phases;
 - checkpoint every successful replacement creation and keep the replacement
@@ -2856,7 +2867,7 @@ Set-Location .\ObjectStoreScenarioTest
 The repository already contains the project skill at:
 
 ```text
-.github/skills/scenario-test-runner/SKILL.md
+.github/skills/objectstore-scenario-test-runner/SKILL.md
 ```
 
 Start Copilot CLI from the repository root:
@@ -2888,15 +2899,15 @@ Inside an existing Copilot CLI session:
 /skills info scenario-test-runner
 ```
 
-You can also copy the complete `scenario-test-runner` directory to:
+You can also copy the complete `objectstore-scenario-test-runner` directory to:
 
 ```text
-%USERPROFILE%\.copilot\skills\scenario-test-runner
+%USERPROFILE%\.copilot\skills\objectstore-scenario-test-runner
 ```
 
 The skill directory includes `SKILL.md`, the harness, status script, scenario
-contract, and README. Runtime dependency binaries must still be provisioned
-separately.
+contract documents, and README. Runtime dependency binaries must still be
+provisioned separately.
 
 After installation, invoke it with one of:
 
@@ -2905,7 +2916,7 @@ User-Upsert
 Group-Upsert
 User-Properties-Deletion
 Group-Properties-Deletion
-Run-All-Scenarios
+Run-All-OBScenarios
 ```
 
 This directory is the single source of truth for the skill. Edit these files
