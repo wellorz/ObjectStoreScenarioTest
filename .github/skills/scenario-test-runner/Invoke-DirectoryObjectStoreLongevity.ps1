@@ -5,8 +5,8 @@ param(
     [ValidateSet("AttributeCoverage", "Longevity", "ScenarioTest")]
     [string] $WorkloadMode = "AttributeCoverage",
 
-    [ValidateSet("User-Upsert", "Group-Upsert", "User-Properties-Deletion", "Group-Properties-Deletion", "Run-All-Scenarios")]
-    [string] $ScenarioCommand = "Run-All-Scenarios",
+    [ValidateSet("User-Upsert", "Group-Upsert", "User-Properties-Deletion", "Group-Properties-Deletion", "Run-All-OBScenarios")]
+    [string] $ScenarioCommand = "Run-All-OBScenarios",
 
     [ValidateSet("Full", "MiniSet")]
     [string] $ScenarioSetMode = "Full",
@@ -184,8 +184,8 @@ $script:ScenarioLogSegments = [ordered]@{
 $script:ScenarioLogNextIndex = @{}
 $script:ScenarioTotalObjectWork = 0L
 $script:ScenarioCompletedObjectWork = 0L
-$script:ScenarioPlanVersion = 4
-$script:ScenarioSharedPopulationVersion = 1
+$script:ScenarioPlanVersion = 6
+$script:ScenarioSharedPopulationVersion = 3
 $script:LegacyCommandSpecificPopulation = $false
 $script:ScenarioBatchesPerPhase = if ($ScenarioSetMode -eq "MiniSet") { 1 } else { 4 }
 $script:ScenarioPreflightEstimatedMinutes = 10
@@ -338,6 +338,7 @@ $script:UserRecipientPropertiesForUpsert = @(
     'msExchMailboxPlanType'
     'msExchMailboxRelease'
     'msExchMailboxSecurityDescriptor'
+    'nTSecurityDescriptor'
     'msExchMasterAccountSid'
     'msExchMessageHygieneFlags'
     'msExchMessageHygieneSCLDeleteThreshold'
@@ -440,6 +441,7 @@ $script:UserRecipientPropertiesForUpsert = @(
     'telephoneAssistant'
     'telephoneNumber'
     'textEncodedORAddress'
+    'thumbnailPhoto'
     'title'
     'unauthOrig'
     'userCertificate'
@@ -599,6 +601,7 @@ $script:GroupRecipientPropertiesForUpsert = @(
     'msExchMailboxPlanType'
     'msExchMailboxRelease'
     'msExchMailboxSecurityDescriptor'
+    'nTSecurityDescriptor'
     'msExchMailboxTemplateLink'
     'msExchMasterAccountSid'
     'msExchMaxBlockedSenders'
@@ -711,6 +714,7 @@ $script:GroupRecipientPropertiesForUpsert = @(
     'targetAddress'
     'telephoneNumber'
     'textEncodedORAddress'
+    'thumbnailPhoto'
     'unauthOrig'
     'userCertificate'
     'userSMIMECertificate'
@@ -761,6 +765,7 @@ $script:GroupLinkPropertiesForUpsert = @(
     'groupType'
     'mailNickname'
     'managedBy'
+    'member'
     'msExchAddressBookPolicyLink'
     'msExchAdministrativeUnitLink'
     'msExchApprovalApplicationLink'
@@ -1423,9 +1428,10 @@ function ConvertTo-CurrentScenarioCommandName
 {
     param([AllowNull()] [string] $Value)
 
-    if ([string]::Equals($Value, "RunAll", [StringComparison]::OrdinalIgnoreCase))
+    if ([string]::Equals($Value, "RunAll", [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($Value, "Run-All-Scenarios", [StringComparison]::OrdinalIgnoreCase))
     {
-        return "Run-All-Scenarios"
+        return "Run-All-OBScenarios"
     }
 
     return $Value
@@ -2394,6 +2400,38 @@ function Save-Checkpoint
     Write-RunStatusSnapshot
 }
 
+function Restore-ScenarioDataInconsistentPopulation
+{
+    param([AllowNull()] [object] $Entries)
+
+    foreach ($entry in @($Entries))
+    {
+        if ($null -eq $entry)
+        {
+            continue
+        }
+
+        $propertyNames = @($entry.PSObject.Properties | ForEach-Object { $_.Name })
+        if ($propertyNames.Count -eq 0)
+        {
+            Write-RunEvent -Level "Warning" -Message "Ignored an empty legacy DataInconsistentPopulation checkpoint entry."
+            continue
+        }
+        if ($propertyNames -notcontains "Guid")
+        {
+            throw "DataInconsistentPopulation checkpoint entry is missing the required Guid property."
+        }
+
+        $entryGuid = [Guid]::Empty
+        if (-not [Guid]::TryParse([string]$entry.Guid, [ref]$entryGuid))
+        {
+            throw "DataInconsistentPopulation checkpoint entry contains an invalid Guid."
+        }
+
+        $script:DataInconsistentPopulation[$entryGuid.ToString("D")] = $entry
+    }
+}
+
 function Restore-Checkpoint
 {
     if (-not (Test-Path -LiteralPath $script:CheckpointPath))
@@ -2473,8 +2511,8 @@ function Restore-Checkpoint
         if ($checkpointSharedPopulationVersion -eq 0)
         {
             $script:LegacyCommandSpecificPopulation = $true
-            $legacyIncludesUsers = $ScenarioCommand -in @("User-Upsert", "User-Properties-Deletion", "Run-All-Scenarios")
-            $legacyIncludesGroups = $ScenarioCommand -in @("Group-Upsert", "Group-Properties-Deletion", "Run-All-Scenarios")
+            $legacyIncludesUsers = $ScenarioCommand -in @("User-Upsert", "User-Properties-Deletion", "Run-All-OBScenarios")
+            $legacyIncludesGroups = $ScenarioCommand -in @("Group-Upsert", "Group-Properties-Deletion", "Run-All-OBScenarios")
             $script:ScenarioCounts.N_User =
                 if ($legacyIncludesUsers)
                 {
@@ -2522,7 +2560,7 @@ function Restore-Checkpoint
             }
             else
             {
-                "Run-All-Scenarios"
+                "Run-All-OBScenarios"
             }
         if (-not [string]::Equals($checkpointScenarioCommand, $ScenarioCommand, [StringComparison]::OrdinalIgnoreCase))
         {
@@ -2648,18 +2686,7 @@ function Restore-Checkpoint
     }
     if ($state.PSObject.Properties.Name -contains "DataInconsistentPopulation")
     {
-        foreach ($entry in @($state.DataInconsistentPopulation))
-        {
-            if ($null -eq $entry)
-            {
-                continue
-            }
-            $entryGuid = [Guid]::Empty
-            if ([Guid]::TryParse([string]$entry.Guid, [ref]$entryGuid))
-            {
-                $script:DataInconsistentPopulation[$entryGuid.ToString("D")] = $entry
-            }
-        }
+        Restore-ScenarioDataInconsistentPopulation -Entries $state.DataInconsistentPopulation
     }
     if ($state.PSObject.Properties.Name -contains "PendingPopulationReplacement")
     {
@@ -2734,7 +2761,7 @@ function Assert-ScenarioResumeParameters
         }
         else
         {
-            "Run-All-Scenarios"
+            "Run-All-OBScenarios"
         }
     $savedScenarioSetMode =
         if ($savedPropertyNames -contains "ScenarioSetMode" -and
@@ -5702,7 +5729,7 @@ function Get-ScenarioKnownMultiValued
 {
     param([Parameter(Mandatory)] [string] $Name)
 
-    return $Name -match "(?i)^(authOrig|unauthOrig|dLMemRejectPerms|dLMemSubmitPerms|proxyAddresses|publicDelegates|showInAddressBook|msExchPoliciesIncluded|msExchPoliciesExcluded|msExchCapabilityIdentifiers|msExchAlternateMailboxes|msExchMobileAllowedDeviceIds|msExchMobileBlockedDeviceIds|msExchNonCompliantDevices|msExchMultiMailboxDatabasesLink|msExchMultiMailboxGUIDs|msExchMultiMailboxLocationsLink|msExchSenderHintTranslations|msExchSharingAnonymousIdentities|msExchSharingPartnerIdentities|msExchTeamMailboxOwners|msExchUMCallingLineIds|msExchUserHoldPolicies|userCertificate|userSMIMECertificate|msExchSIDHistory)$"
+    return $Name -match "(?i)^(authOrig|unauthOrig|dLMemRejectPerms|dLMemSubmitPerms|member|proxyAddresses|publicDelegates|showInAddressBook|msExchPoliciesIncluded|msExchPoliciesExcluded|msExchCapabilityIdentifiers|msExchAlternateMailboxes|msExchMobileAllowedDeviceIds|msExchMobileBlockedDeviceIds|msExchNonCompliantDevices|msExchMultiMailboxDatabasesLink|msExchMultiMailboxGUIDs|msExchMultiMailboxLocationsLink|msExchSenderHintTranslations|msExchSharingAnonymousIdentities|msExchSharingPartnerIdentities|msExchTeamMailboxOwners|msExchUMCallingLineIds|msExchUserHoldPolicies|userCertificate|userSMIMECertificate|msExchSIDHistory)$"
 }
 
 function Get-ScenarioSyntheticMetadata
@@ -5722,7 +5749,7 @@ function Get-ScenarioSyntheticMetadata
     {
         $syntax = "2.5.5.10"
     }
-    elseif ($Name -match "(?i)(Link|DN$|^authOrig$|^unauthOrig$|^dLMemRejectPerms$|^dLMemSubmitPerms$|^manager$|^managedBy$|^altRecipient$|^publicDelegates$|^showInAddressBook$)")
+    elseif ($Name -match "(?i)(Link|DN$|^authOrig$|^unauthOrig$|^dLMemRejectPerms$|^dLMemSubmitPerms$|^manager$|^managedBy$|^member$|^altRecipient$|^publicDelegates$|^showInAddressBook$)")
     {
         $syntax = "2.5.5.1"
     }
@@ -6962,7 +6989,17 @@ function Initialize-ScenarioCertificate
                 return
             }
         }
-        throw "The resumed scenario could not restore its ledger-owned certificate."
+        $zeroStateResume =
+            $certificateRecord.Count -eq 0 -and
+            $script:ScenarioSupportingObjects.Count -eq 0 -and
+            $script:Contacts.Count -eq 0 -and
+            $script:Groups.Count -eq 0 -and
+            [long]$script:Counters.OperationsAttempted -eq 0 -and
+            $script:ScenarioCompletedObjectWork -eq 0
+        if (-not $zeroStateResume)
+        {
+            throw "The resumed scenario could not restore its ledger-owned certificate."
+        }
     }
     $certificateCommand = Get-Command "New-SelfSignedCertificate" -ErrorAction SilentlyContinue
     if ($null -eq $certificateCommand)
@@ -7195,7 +7232,8 @@ function New-ScenarioTypedValue
             return ,(New-ScenarioSecurityDescriptorBytes)
         }
         "Certificate" {
-            if ($null -eq $script:ScenarioTargets.CertificateBytes)
+            if (-not $script:ScenarioTargets.ContainsKey("CertificateBytes") -or
+                $null -eq $script:ScenarioTargets.CertificateBytes)
             {
                 throw "Attribute '$name' requires a valid certificate blob, but no certificate is available."
             }
@@ -7635,7 +7673,7 @@ function Get-ScenarioQualificationFingerprint
     param(
         [switch] $LegacyWithoutScenarioSetMode,
         [switch] $LegacyWithoutPopulationSource,
-        [switch] $LegacyRunAllCommandName)
+        [string] $LegacyScenarioCommandName)
 
     if ($script:LegacyCommandSpecificPopulation)
     {
@@ -7659,9 +7697,9 @@ function Get-ScenarioQualificationFingerprint
         PlanVersion = $script:ScenarioPlanVersion
         BatchesPerPhase = $script:ScenarioBatchesPerPhase
         ScenarioCommand =
-            if ($LegacyRunAllCommandName)
+            if (-not [string]::IsNullOrWhiteSpace($LegacyScenarioCommandName))
             {
-                "RUNALL"
+                $LegacyScenarioCommandName.ToUpperInvariant()
             }
             else
             {
@@ -8127,11 +8165,16 @@ function Get-ScenarioQualificationStatus
         $fingerprintParameters["LegacyWithoutPopulationSource"] = $true
     }
     if ([string]::Equals(
-        [string]$qualification.ScenarioCommand,
-        "RunAll",
-        [StringComparison]::OrdinalIgnoreCase))
+            [string]$qualification.ScenarioCommand,
+            "RunAll",
+            [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals(
+            [string]$qualification.ScenarioCommand,
+            "Run-All-Scenarios",
+            [StringComparison]::OrdinalIgnoreCase))
     {
-        $fingerprintParameters["LegacyRunAllCommandName"] = $true
+        $fingerprintParameters["LegacyScenarioCommandName"] =
+            [string]$qualification.ScenarioCommand
     }
     $expectedQualificationFingerprint = Get-ScenarioQualificationFingerprint @fingerprintParameters
     if (-not [string]::Equals(

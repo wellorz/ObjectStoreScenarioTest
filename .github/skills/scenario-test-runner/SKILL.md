@@ -1,28 +1,31 @@
 ---
 name: scenario-test-runner
-description: Run User-Upsert, Group-Upsert, User-Properties-Deletion, Group-Properties-Deletion, or Run-All-Scenarios Directory Object Store scenarios. Supports start, resume, monitoring, diagnosis, repair, timing reports, and repro packages with adaptive bounded-memory reporting.
+description: Run User-Upsert, Group-Upsert, User-Properties-Deletion, Group-Properties-Deletion, or Run-All-OBScenarios Directory Object Store scenarios. Supports start, resume, monitoring, diagnosis, repair, timing reports, and repro packages with adaptive bounded-memory reporting.
 ---
 
 # Scenario Test Runner
 
 ## Purpose
-Execute `ScenarioTest.md` and `Invoke-DirectoryObjectStoreLongevity.ps1` as an operational runbook while minimizing unnecessary preflight cost and preserving evidence for diagnosis.
+Execute `ScenarioTest.md`, `ScenarioTest-Qualification.md`, and
+`Invoke-DirectoryObjectStoreLongevity.ps1` as an operational runbook while
+minimizing unnecessary preflight cost and preserving evidence for diagnosis.
 
 ## User-facing commands
 
 Treat any of these exact, case-insensitive command names as a request to start
 the corresponding ScenarioTest subset:
 
-| Command | Scenarios | `--miniSet` scenario | `--full` scenario |
-| --- | --- | ---: | ---: |
-| `User-Upsert` | Pure User Recipient Upsert; Pure User Link Upsert; Mixed User Upsert | 5 minutes | 60 minutes |
-| `Group-Upsert` | Pure Group Recipient Upsert; Pure Group Link Upsert; Mixed Group Upsert | 5 minutes | 75 minutes |
-| `User-Properties-Deletion` | Pure User Recipient Deletion; Pure User Link Deletion; Mixed User Deletion | 10 minutes | 80 minutes |
-| `Group-Properties-Deletion` | Pure Group Recipient Deletion; Pure Group Link Deletion; Mixed Group Deletion | 10 minutes | 95 minutes |
-| `Run-All-Scenarios` | All 12 scenarios in canonical order | 30 minutes | 305 minutes |
+| Command                     | Scenarios                                                                     | `--miniSet` scenario | `--full` scenario |
+| :-------------------------- | :---------------------------------------------------------------------------- | -------------------: | ----------------: |
+| `User-Upsert`               | Pure User Recipient Upsert; Pure User Link Upsert; Mixed User Upsert          |            5 minutes |        60 minutes |
+| `Group-Upsert`              | Pure Group Recipient Upsert; Pure Group Link Upsert; Mixed Group Upsert       |            5 minutes |        75 minutes |
+| `User-Properties-Deletion`  | Pure User Recipient Deletion; Pure User Link Deletion; Mixed User Deletion    |           10 minutes |        80 minutes |
+| `Group-Properties-Deletion` | Pure Group Recipient Deletion; Pure Group Link Deletion; Mixed Group Deletion |           10 minutes |        95 minutes |
+| `Run-All-OBScenarios`       | All 12 scenarios in canonical order                                           |           30 minutes |       305 minutes |
 
-Treat `RunAll` only as a legacy persisted value when resuming an existing run;
-do not expose or accept it as a new user-facing command.
+Treat `RunAll` and `Run-All-Scenarios` only as legacy persisted values when
+resuming an existing run; do not expose or accept them as new user-facing
+commands.
 
 Add these mandatory stage estimates:
 
@@ -36,13 +39,13 @@ Total estimates:
 These columns combine the scenario set mode with whether the compatible shared
 population is reused or newly created; they do not refer to batch numbers.
 
-| Command | Mini-set, reused population | Mini-set, new population | Full, reused population | Full, new population |
-| --- | ---: | ---: | ---: | ---: |
-| `User-Upsert` | 15 min | 30 min | 70 min | 85 min |
-| `Group-Upsert` | 15 min | 30 min | 85 min | 100 min |
-| `User-Properties-Deletion` | 20 min | 35 min | 90 min | 105 min |
-| `Group-Properties-Deletion` | 20 min | 35 min | 105 min | 120 min |
-| `Run-All-Scenarios` | 40 min | 55 min | 315 min | 330 min |
+| Command                     | Mini-set, reused population | Mini-set, new population | Full, reused population | Full, new population |
+| :-------------------------- | --------------------------: | -----------------------: | ----------------------: | -------------------: |
+| `User-Upsert`               |                      15 min |                   30 min |                  70 min |               85 min |
+| `Group-Upsert`              |                      15 min |                   30 min |                  85 min |              100 min |
+| `User-Properties-Deletion`  |                      20 min |                   35 min |                  90 min |              105 min |
+| `Group-Properties-Deletion` |                      20 min |                   35 min |                 105 min |              120 min |
+| `Run-All-OBScenarios`       |                      40 min |                   55 min |                 315 min |              330 min |
 
 Each command accepts one optional mode modifier:
 
@@ -58,7 +61,7 @@ Examples:
 User-Upsert
 User-Upsert --full
 User-Upsert --miniSet
-Run-All-Scenarios --miniSet
+Run-All-OBScenarios --miniSet
 ```
 
 Map the modifier to the harness:
@@ -98,10 +101,10 @@ directory. A candidate must:
 
 - have `summary.json` status `Passed`;
 - have `parameters.json` and `checkpoint.json`;
-- declare `SharedPopulationVersion=1`;
+- declare `SharedPopulationVersion=3`;
 - match organization, side, Object Store destination, and WhatIf mode;
 - not have `CleanupOnSuccess=true`;
-- contain at least 235 contacts and 267 groups in its checkpoint.
+- contain at least 237 contacts and 269 groups in its checkpoint.
 
 Choose the newest compatible candidate. Reuse its `ObjectPrefix` and pass its
 run directory as `-PopulationSourceRunDirectory`. Do not import its phase
@@ -138,15 +141,15 @@ $populationCandidates = @(
                 if ([string]$summary.Status -ieq "Passed" -and
                     [string]$parameters.WorkloadMode -ieq "ScenarioTest" -and
                     $parameterNames -contains "SharedPopulationVersion" -and
-                    [int]$parameters.SharedPopulationVersion -eq 1 -and
+                    [int]$parameters.SharedPopulationVersion -eq 3 -and
                     [string]$parameters.Organization -ieq $Organization -and
                     [string]$parameters.Side -ieq $Side -and
                     [string]$parameters.ObjectStoreDestination -ieq $ObjectStoreDestination -and
                     [bool]$parameters.WhatIfTraffic -eq [bool]$WhatIfTraffic -and
                     $parameterNames -contains "CleanupOnSuccess" -and
                     -not [bool]$parameters.CleanupOnSuccess -and
-                    @($checkpoint.Contacts).Count -ge 235 -and
-                    @($checkpoint.Groups).Count -ge 267)
+                    @($checkpoint.Contacts).Count -ge 237 -and
+                    @($checkpoint.Groups).Count -ge 269)
                 {
                     [pscustomobject]@{
                         RunDirectory = $_.FullName
@@ -196,13 +199,13 @@ $commandCode = @{
     "Group-Upsert" = "GU"
     "User-Properties-Deletion" = "UD"
     "Group-Properties-Deletion" = "GD"
-    "Run-All-Scenarios" = "RA"
+    "Run-All-OBScenarios" = "RA"
 }[$ScenarioCommand]
 $ObjectPrefix = "DOS$commandCode-$([datetime]::UtcNow.ToString('MMddHHmmss'))-$([guid]::NewGuid().ToString('N').Substring(0, 6))"
 ```
 
 The generated value satisfies the harness's 3-32 character constraint. A new
-population always creates the complete shared pool of 235 contacts and 267
+population always creates the complete shared pool of 237 contacts and 269
 groups, regardless of which command creates it. Report the prefix and whether
 the population is new or reused, but do not ask the user to approve or edit
 either choice.
@@ -277,7 +280,7 @@ Set mode: <Full-or-MiniSet>
 Scenarios: <ordered scenario names>
 Estimated duration: <estimate>
 Time breakdown: preflight <10m>; population <0m reused-or-15m new>; scenario <estimate>
-Population: <reused from run-id-or-235 contacts and 267 groups to create>
+Population: <reused from run-id-or-237 contacts and 269 groups to create>
 Scenario batches: <completed>/<mode-specific-total>
 Organization: <supplied-or-discovered-organization>
 Object prefix: <automatically-generated-prefix>
@@ -288,7 +291,7 @@ Monitoring: every 2 minutes for the first 10 traffic minutes, then every
 This announcement is not the initial progress report. Immediately after the
 process starts, create the monitoring schedule, collect the full status, and
 emit the complete progress-report template below. Never replace the initial
-report with a minimal `Run-All-Scenarios Full started` message or a short PID/prefix/run
+report with a minimal `Run-All-OBScenarios Full started` message or a short PID/prefix/run
 directory list.
 
 Before the initial report, poll for the run's first `status.json` snapshot for
@@ -311,8 +314,8 @@ Mode-specific totals:
 
 - subset command with `Full`: 12 batches;
 - subset command with `MiniSet`: 3 batches;
-- `Run-All-Scenarios --full` or plain `Run-All-Scenarios`: 48 batches;
-- `Run-All-Scenarios --miniSet`: 12 batches.
+- `Run-All-OBScenarios --full` or plain `Run-All-OBScenarios`: 48 batches;
+- `Run-All-OBScenarios --miniSet`: 12 batches.
 
 The estimates come from measured stage timings and are rounded upward to the
 next five minutes. Preflight is mandatory for every new command. Population
@@ -323,8 +326,8 @@ add unplanned time.
 
 This directory is the canonical, self-contained skill package. It includes
 `SKILL.md`, the harness, status helper, scenario contract, and operating guide.
-Share or install the complete `scenario-test-runner` directory; do not create
-or maintain duplicate operational files at the repository root.
+Share or install the complete `objectstore-scenario-test-runner` directory; do
+not create or maintain duplicate operational files at the repository root.
 
 Provision `RuntimeDependencies\net472` separately from an authorized internal
 build. Do not commit compiled Exchange binaries, credentials, or TDS run
@@ -365,8 +368,12 @@ passwords, or feed credentials to this repository or the command.
 
 ## Required inputs and discovery
 
-1. Locate `ScenarioTest.md` and `Invoke-DirectoryObjectStoreLongevity.ps1`.
-2. Read `ScenarioTest.md` completely and inspect the script parameter block and execution entry point before executing any command.
+1. Locate `ScenarioTest.md`, `ScenarioTest-Qualification.md`, and
+   `Invoke-DirectoryObjectStoreLongevity.ps1`.
+2. Read both contract documents completely before executing any command. Each
+   document is small enough for a whole-file read; do not use `view_range` for
+   either one. Inspect the script parameter block and execution entry point as
+   well.
 3. Extract and maintain these commands, parameters, or procedures from the document and script:
    - scenario command and estimate
    - full preflight
@@ -379,7 +386,9 @@ passwords, or feed credentials to this repository or the command.
    - object-level diagnostics
    - organization, side, Object Store destination, compare setup script,
      runtime dependency root, output root, and automatic object-prefix format
-4. Never invent a command, environment, tenant, object identifier, cleanup scope, or success criterion that is absent from `ScenarioTest.md`, the harness, supporting scripts, or command output.
+4. Never invent a command, environment, tenant, object identifier, cleanup
+   scope, or success criterion that is absent from the ScenarioTest contract
+   documents, the harness, supporting scripts, or command output.
 5. If a required command is not documented, stop before the unsafe step and report the exact missing item plus the evidence collected so far.
 
 ## Persistent run state
@@ -481,7 +490,7 @@ Run the complete preflight before starting traffic when any of these is true:
    If any item is missing, do not run or resume ScenarioTest. Update and
    validate the harness first.
 2. Perform the complete environment preflight and exhaustive harness
-   qualification defined in `ScenarioTest.md`.
+   qualification defined in `ScenarioTest-Qualification.md`.
 3. Record each check and its result plus evidence paths. Do not duplicate
    unbounded command output into local state.
 4. Do not start traffic if a required preflight or qualification check fails.
@@ -570,8 +579,8 @@ After a proven terminal data inconsistency:
 2. Preserve the old entity set in
    `retired-population-pNN-gNN.json`; do not delete it, because it is diagnostic
    evidence.
-3. If the failed phase is a User phase, replace all 235 contacts. If it is a
-   Group phase, replace all 267 groups.
+3. If the failed phase is a User phase, replace all 237 contacts. If it is a
+   Group phase, replace all 269 groups.
 4. Increment `PopulationGeneration` so replacement names cannot collide with
    the original deterministic names.
 5. Clear only the failed phase's current/later batch summaries, plans, pending

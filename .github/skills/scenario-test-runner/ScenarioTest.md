@@ -25,10 +25,10 @@ Use these embedded arrays from the script:
 
 | Array | Symbol | Current count |
 |---|---|---:|
-| `UserRecipientPropertiesForUpsert` | `N_URP_U` | 235 |
-| `GroupRecipientPropertiesForUpsert` | `N_GRP_U` | 267 |
+| `UserRecipientPropertiesForUpsert` | `N_URP_U` | 237 |
+| `GroupRecipientPropertiesForUpsert` | `N_GRP_U` | 269 |
 | `UserLinkPropertiesForUpsert` | `N_ULP_U` | 33 |
-| `GroupLinkPropertiesForUpsert` | `N_GLP_U` | 45 |
+| `GroupLinkPropertiesForUpsert` | `N_GLP_U` | 46 |
 | `UserRecipientPropertiesForDeletion` | `N_URP_D` | 235 |
 | `GroupRecipientPropertiesForDeletion` | `N_GRP_D` | 265 |
 | `UserLinkPropertiesForDeletion` | `N_ULP_D` | 33 |
@@ -46,7 +46,7 @@ $N_Groups = [Math]::Max(
     [Math]::Max($N_GLP_U, [Math]::Max($N_GRP_D, $N_GLP_D)))
 ```
 
-With the current arrays, create 235 mail contacts and 267 groups.
+With the current arrays, create 237 mail contacts and 269 groups.
 
 ## General Requirements
 
@@ -56,14 +56,14 @@ The harness supports these command subsets:
 - `Group-Upsert`: Pure Group Recipient Upsert, Pure Group Link Upsert, Mixed Group Upsert.
 - `User-Properties-Deletion`: Pure User Recipient Deletion, Pure User Link Deletion, Mixed User Deletion.
 - `Group-Properties-Deletion`: Pure Group Recipient Deletion, Pure Group Link Deletion, Mixed Group Deletion.
-- `Run-All-Scenarios`: all 12 phases in canonical order.
+- `Run-All-OBScenarios`: all 12 phases in canonical order.
 
 The scenario set mode controls batches per selected phase:
 
 - `Full` is the default and runs batch 0 plus repetitions 1-3: four batches per
-  phase, 12 for a subset command, and 48 for `Run-All-Scenarios`.
+  phase, 12 for a subset command, and 48 for `Run-All-OBScenarios`.
 - `MiniSet` runs only batch 0: one batch per phase, 3 for a subset command, and
-  12 for `Run-All-Scenarios`.
+  12 for `Run-All-OBScenarios`.
 
 Persist the command and set mode in the checkpoint and reject a resume
 requested with a different command or mode. Mini-set mode preserves the full
@@ -73,7 +73,7 @@ failure behavior; it only omits repetitions 1-3.
 ## Shared Population
 
 The first ScenarioTest command on a TDS creates the complete reusable
-population of 235 contacts and 267 groups, even when the selected phases use
+population of 237 contacts and 269 groups, even when the selected phases use
 only one object type. A later command may pass
 `-PopulationSourceRunDirectory` for a successful compatible run.
 
@@ -92,7 +92,7 @@ that point, resume must repeat the idempotent import before population
 completion; it must not silently create a duplicate population from an empty
 checkpoint.
 
-Persist `SharedPopulationVersion=1` in run artifacts. Only runs carrying the
+Persist `SharedPopulationVersion=3` in run artifacts. Only runs carrying the
 current shared-population version are eligible as sources; older
 command-specific populations must not be assumed complete.
 
@@ -227,7 +227,7 @@ phase starts. `Full` runs the initial coverage batch and repetitions 1, 2, and
 3 for 48 batches total. `MiniSet` runs only the initial coverage batch for 12
 batches total.
 
-Phase transitions reuse the existing 235 User recipients or 267 Group
+Phase transitions reuse the existing 237 User recipients or 269 Group
 recipients from the run ledger. Do not recreate, replace, or renumber objects
 that passed the previous phase unless a terminal object-specific data
 inconsistency requires replacement of the complete entity set for the failed
@@ -270,79 +270,9 @@ pause otherwise healthy traffic.
 
 ## Exhaustive Harness Qualification
 
-The harness must discover generator, planner, target-selection, and command
-construction defects before scenario traffic. It must provide a qualification
-mode that executes the complete deterministic plan without advancing the real
-scenario checkpoint.
-
-Qualification must:
-
-1. Materialize every phase, every batch configured for the selected set mode,
-   every randomized object position, every selected property, and every
-   generated value for the requested seed.
-2. Validate all values against LDAP schema syntax, single/multivalue shape,
-   `rangeLower`, `rangeUpper`, enum/domain restrictions, XML serialization
-   contracts, GUID/SID/binary formats, and property-specific invariants.
-3. Validate semantic targets, not only DN syntax. Examples:
-   - `msExchCU` must target the tenant configuration unit;
-   - `msExchOURoot` must target the organization root;
-   - `homeMTA` must target a valid MTA;
-   - policy GUID-string properties must contain valid policy object GUIDs;
-   - mailbox, database, policy, recipient, group, server, and computer links
-     must target objects of the required class and tenant.
-4. Exercise the real request planner and prove every AD read and LDAP Modify is
-   split below supported attribute-count and encoded-payload limits.
-5. Use isolated disposable User and Group probe objects to perform representative
-   LDAP writes and read-backs for every distinct property/value shape. Restore or
-   delete only those probe objects afterward.
-6. Continue qualification after an individual property fails. Aggregate every
-   failure by phase, batch, position, property, generated value, target, command,
-   and exception, then fail once with the complete defect list.
-7. Produce a machine-readable qualification report. Scenario traffic must not
-   start unless that report contains zero harness defects.
-8. Publish `qualification-progress.json` while the deterministic plan is being
-   checked. It must include current phase, batch, object position, batch object
-   count, completed object-plans, total object-plans, percentage, generated
-   selection/value counts, and failures found so far. Monitoring must report
-   both batch `m/N` and overall `m/N`.
-
-A syntax-only parse, one representative generated value, or one comparison
-probe is not sufficient qualification for a new run.
-
-For a resume of the same plan-version checkpoint, reuse the run directory's
-existing zero-defect `qualification.json`. Do not rerun the full environment
-preflight, qualification visits, completed scenario batches, or completed
-object mutations. Validate the specific script fix through its affected
-runtime seam, restore the persisted runtime target context, and continue from
-the saved object position. Build and persist target context only when no valid
-same-plan cache exists.
-
-Run the full preflight on resume only when direct evidence ties the failure to
-preflight, environment, dependency, cookie, comparison-runtime, configuration,
-or target-discovery state. The operator can explicitly request this with
-`-ForceFullPreflightOnResume`.
-
-For a read-only environment validation, run ScenarioTest with `-PreflightOnly`. This
-loads the Windows PowerShell Exchange snap-in, resolves the forest, validates
-the six A/B Object Store sync cookies and compare cookies, checks schema/value
-prerequisites, performs one non-uploading comparison runtime probe, and exits
-before creating test objects or starting traffic. Copy the harness's
-`RuntimeDependencies\net472` folder to every TDS box with the script. The
-preflight loads `Microsoft.Exchange.Directory.ChaosTest.dll` from that bundle
-when the TDS build does not install its .NET Framework build under `V15\Bin`.
-The preflight also rejects AD-owned operational attributes in upsert arrays.
-`objectCategory`, for example, is readable in schema metadata but AD rejects
-direct replacement with `ADIllegalModifyOperationException`.
-The sync-cookie read first warms the local Exchange directory context with
-`Get-AccountPartition`, then retries transient cookie-query failures up to
-three times while recording inner-exception details. A persistent query failure
-stops preflight; it is not reported as a missing-cookie configuration problem.
-Only the six `Recipients`, `Links`, and `TenantConfig` cookies for sides A and B
-are required; a Training-side cookie is not required.
-Each compare-cookie read runs in a bounded Windows PowerShell child process
-(`CompareCookieReadTimeoutSeconds`, default 30 seconds). The child uses
-`CompareCookieHelper` and unwraps task results with `GetAwaiter().GetResult()`;
-a timeout or helper failure stops preflight with diagnostics.
+The complete qualification, preflight, and resume contract is in
+`ScenarioTest-Qualification.md`. It is a required part of this contract and
+must be read before starting or resuming scenario traffic.
 
 ## Pure Phase Definitions
 
